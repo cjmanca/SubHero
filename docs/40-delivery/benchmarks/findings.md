@@ -6,8 +6,8 @@
 
 | ID | Purpose | Current state | Evidence/decision |
 | --- | --- | --- | --- |
-| B0 | Corpus, labels, minimal runner | **in_progress** — runner + synthetic fixture complete | `benchmarks/` CLI implemented; offline runs on `Fx00` fixture produced machine-readable proposals/scores; real-media clean controls (G0) **pending** user episodes E01/E02 |
-| B1 | ffsubsync / ALASS / targeted ASR validation | **in_progress** — arms executable, plumbing matrix run | ffsubsync 0.5.1 global + `--split-penalty` executed; ALASS absent → arm records `unsupported`; `b1-va` → `not_run` (no local ASR endpoint configured). No algorithm selection; G1 **blocked** pending real media |
+| B0 | Corpus, labels, minimal runner | **in_progress** — runner + synthetic fixture complete; scoring/measurement validity corrected 2026-10-14 | `benchmarks/` CLI implemented; offline runs on `Fx00` fixture produced machine-readable proposals/scores; real-media clean controls (G0) **pending** user episodes E01/E02 |
+| B1 | ffsubsync / ALASS / targeted ASR validation | **in_progress** — arms executable, corrected harness re-run on synthetic matrix | ffsubsync 0.5.1 global + `--split-penalty` executed; ALASS absent → arm records `unsupported`; `b1-va` → `not_run` (no local ASR/semantic-verifier endpoints configured). No algorithm selection; G1 **blocked** pending real media |
 | B2 | Full source-language ASR + forced alignment | **Not started** | None |
 | B3 | Cross-language utterance/cue matching | **Not started** | None |
 | B4 | Translation correction | **Not started** | None |
@@ -29,6 +29,20 @@ Mark `not_run`, `blocked`, `in_progress`, `completed` or `invalidated` explicitl
 - Sample machine-readable + human report: `benchmarks/reports/Fx00-plumbing-report.md` (synthetic denominators: 1 fixture episode; all variants correlated).
 - **Conclusion so far:** the harness can execute the B1 matrix and score it honestly; **no candidate is adopted**, and the G1 gate has no real-media evidence. Real-episode registration procedure and stream-selection requirements are documented in `benchmarks/README.md`.
 
+
+## Corrected-harness B0/B1 re-run (2026-10-14, genuine executed measurements, synthetic fixture only)
+
+After the reviewer-directed correction milestones (private-data protection, source-stream selection, scoring validity, gold-label leakage removal, cross-language ASR validation, output-mapping/filesystem safety), the canonical Fx00 matrix was re-executed in the repository with the corrected harness (real `ffsubsync 0.5.1`; Python 3.14.0; ALASS absent; ASR/semantic-verifier endpoints unconfigured). Case regeneration reproduced all 7 committed manifests **byte-identically** (determinism preserved through all harness changes). `benchmarks/reports/Fx00-plumbing-report.md` is the committed report from this executed run.
+
+Observed on the corrected harness (denominator: 1 synthetic fixture, correlated variants — plumbing/validity evidence only, never production thresholds):
+
+- **No-op arm receives zero breakpoint-detection credit** on discontinuity cases (S03/S04: candidate-implied breakpoints 0, matched 0, false-positive 0) while the separate unresolved-discontinuity metric correctly reports the injected discontinuities as unresolved (1/1, 3/3-class behavior). The pre-correction residual-domain scorer granted the no-op free detection credit; that artifact is gone.
+- **Offset-recovery sign is pinned:** on S01 (+1.9 s injected constant offset), global arms report applied shift −1900 ms, recovered +1900 ms, **residual 0 ms**; no-op reports applied 0, residual 1900 ms. Direction verified against the corruption generator (`corrupted = original + offset`).
+- **Gold-label leakage boundary measured live:** default proxy arms classify anchors with heuristics only; oracle-assisted diagnostic arms (`b1-pxo-*`, explicitly excluded from `--all`, marker present in proposal notes and reports) show the gold-label path; on the signs-only fixture, both agree the track is all non-speech → `abstain_no_speech_anchors`; direct full-track piecewise arms on signs-only tracks still produce harmful accepted corrections (≈3.6 s median residual) — negative control intact.
+- **Real ffsubsync rewrites event structure in some flows, and the correspondence guard catches it:** S03/S04 full-track arms returned `mapping_failure_ambiguous_text` (equal 24-event counts, normalized text re-attached at shifted positions) and SGN01 full-track global returned `mapping_failure_count_mismatch` (5 inputs → 1 output). Pre-correction positional mapping would have guessed correspondences from these outputs; the corrected harness abstains visibly, and no score in this re-run derives from guessed identity. Consequence for B1 planning: full-track ffsubsync arms must be interpreted through correspondence-preserving flows on real media (proxy/dialogue arms mapped 1:1 on the same cases).
+- **`b1-va` cross-language validation posture:** without configured ASR/semantic-verifier endpoints it records `not_run` with original timing retained (all 7 cases). The lexical-era systematic false-reject of valid translations is removed in code (cross-language pairs are decided only by the translation-tolerant verifier boundary; mocked-endpoint tests cover translations→accept, contradictions→reject, absent-verifier→abstain, injection-steered responses→unknown, never false accept). Real b1-va behavior remains **EXTERNAL/UNVERIFIED** until local endpoints are configured.
+- Automated verification: 151 focused offline tests pass (`python -m pytest benchmarks\tests -q`); `ruff check`/`ruff format --check` clean; independent read-only review of the full correction diff: no P0/P1; acceptance-blocking P2s (report-destination guard ordering, transliterated-transcript false rejects, verifier prompt-injection steering) fixed with regression tests; P3 hardening (Windows reserved ids, rights enumeration/home coherence, zero-audio refusal, fresh-clone test hermeticity) folded in. Full ledger: `STATUS.md`.
+- **Not claimed:** G0 (known-good real-episode clean controls) and G1 (sync algorithm decision) remain **blocked** — they require user-supplied E01/E02 real episodes. No candidate is adopted. No threshold is calibrated from synthetic data.
 
 ## Decision record template
 
