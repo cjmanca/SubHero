@@ -17,6 +17,8 @@ def build_report(
     scores: list[dict],
     tool_versions: dict[str, str],
 ) -> str:
+    """Render schema_version-2 scores; v1 (residual-domain detection) rows are ignored."""
+    scores = [s for s in scores if int(s.get("schema_version", 0)) == 2]
     lines: list[str] = []
     lines.append("# Benchmark comparison report")
     lines.append("")
@@ -44,9 +46,11 @@ def build_report(
         )
         lines.append("")
         lines.append(
-            "| Candidate | Status | Proposals | Accepted | Repaired | Worsened | Harmful prop/acc | Median/P90/P95 final onset err | Breaks true/det/false+ | Denominator (cues: total/altered/unaltered) |"
+            "| Candidate | Status | Proposals | Accepted | Repaired | Worsened | Harmful prop/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |"
         )
-        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        lines.append(
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        )
         for s in case_scores:
             c = s["counts"]
             d = s["denominators"]
@@ -56,7 +60,7 @@ def build_report(
                 (r for r in case_runs if r["candidate_id"] == s["candidate_id"]), {}
             )
             lines.append(
-                "| {cand} | {status} | {prop} | {acc} | {rep} | {wor} | {hp}/{ha} | {med} / {p90} / {p95} | {tb}/{db}/{fp} | {tot}/{alt}/{unalt} |".format(
+                "| {cand} | {status} | {prop} | {acc} | {rep} | {wor} | {hp}/{ha} | {med} / {p90} / {p95} | {imp}/{mat}/{fp} | {unres}/{tb} | {tot}/{alt}/{unalt} |".format(
                     cand=s["candidate_id"],
                     status=run.get("status", "scored"),
                     prop=c["proposals_nonzero"],
@@ -68,9 +72,11 @@ def build_report(
                     med=_fmt_us(te["median_abs_us"]),
                     p90=_fmt_us(te["p90_abs_us"]),
                     p95=_fmt_us(te["p95_abs_us"]),
-                    tb=dis["matched_true_breakpoints"],
-                    db=dis["detected_breakpoints"],
+                    imp=dis["detected_breakpoints"],
+                    mat=dis["matched_true_breakpoints"],
                     fp=dis["false_positive_breakpoints"],
+                    unres=dis["unresolved_true_breakpoints"],
+                    tb=dis["true_breakpoints"],
                     tot=d["total_cues"],
                     alt=d["altered_cues"],
                     unalt=d["unaltered_cues"],
@@ -78,11 +84,26 @@ def build_report(
             )
         lines.append("")
         for s in case_scores:
+            dis = s["discontinuities"]
+            lines.append(
+                f"- `{s['candidate_id']}` discontinuities: candidate-implied breakpoints "
+                f"{dis['detected_breakpoints']} (matched {dis['matched_true_breakpoints']} "
+                f"of {dis['true_breakpoints']} true, false-positive "
+                f"{dis['false_positive_breakpoints']}, jump threshold "
+                f"{dis['jump_threshold_us'] / 1000:.0f} ms); final timeline still "
+                f"discontinuous at {dis['unresolved_true_breakpoints']} of "
+                f"{dis['true_breakpoints']} true breakpoints "
+                f"({dis['true_breakpoints_without_straddle_pair']} without a straddling cue pair)"
+            )
+        for s in case_scores:
             if s.get("offset_recovery"):
                 o = s["offset_recovery"]
                 lines.append(
                     f"- `{s['candidate_id']}` offset recovery: true {o['true_offset_us'] / 1000:.0f} ms, "
-                    f"estimated correction {o['estimated_correction_us'] / 1000:.0f} ms, residual {o['residual_us'] / 1000:.0f} ms"
+                    f"applied shift {o['applied_shift_us'] / 1000:.0f} ms, recovered "
+                    f"{o['recovered_offset_us'] / 1000:.0f} ms, residual "
+                    f"{o['residual_us'] / 1000:.0f} ms (applied shift is what the "
+                    "candidate moved the subtitles; exact recovery means applied_shift == -true_offset)"
                 )
         for r in case_runs:
             bits = [f"- `{r['candidate_id']}`: {r['status']}"]

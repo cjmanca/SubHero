@@ -4,6 +4,27 @@ Tolerances are declared evaluation parameters reported with every result;
 they are NOT calibrated production thresholds. Proposed corrections and
 automatically accepted corrections are scored separately. Clean controls and
 unaffected cues act as negative controls. Denominators are always reported.
+
+Discontinuity semantics (schema_version 2):
+- Candidate-implied breakpoints come from the candidate's PROPOSED corrections
+  only: per-cue applied correction d(cid) = proposed_onset - corrupted_onset
+  (no proposal entry -> d = 0); a breakpoint is implied at the ORIGINAL onset
+  of cue b when d steps between consecutive cues (in original onset order) by
+  more than jump_threshold_us = max(2 * good_us, BREAK_JUMP_FLOOR_US = 250 ms).
+  An unchanged/no-op candidate therefore implies zero breakpoints and gets no
+  detection credit (residual steps are NOT detection).
+- Unresolved true breakpoints answer the separate question "does the FINAL
+  (accepted, else proposed) timeline still step at each true breakpoint": for
+  the cue pair straddling true breakpoint t in original onset order, it is
+  resolved when the final onset residuals on both sides are equalized within
+  jump_threshold_us (same applied offset), unresolved when they still step
+  beyond it. A true breakpoint with no straddling cue pair is counted
+  unresolved (conservative) and reported separately.
+- Offset recovery (S01): Segment.apply in timeline.py shows corruption is
+  corrupted = original + params.offset_us (verified against committed
+  Fx00-S01.case.json: injected deltas equal +offset_us). fit_regions region
+  offset_us is the applied shift (proposed - corrupted). exact recovery means
+  applied_shift == -true_offset; residual_us = |-applied_shift - true_offset|.
 """
 
 from __future__ import annotations
@@ -12,6 +33,10 @@ import itertools
 from dataclasses import dataclass
 
 from .manifests import AcceptanceRecord, CaseManifest, ProposalRecord
+
+BREAK_JUMP_FLOOR_US = 250_000
+OFFSET_RECOVERY_STATUSES = ("1:1-order-preserving", "noop")
+SCORE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -152,43 +177,86 @@ def score_case(
         and (t[0] != corrupted_times[cid][0] or t[1] != corrupted_times[cid][1])
     )
 
-    detected_breaks: list[int] = []
+    # Candidate-implied breakpoints: derived from the candidate's own applied
+    # corrections (proposed - corrupted), never from residual timing errors.
     regions = proposal.regions
     break_order = sorted(
         (cid for cid in per_cue if "onset_err_final_us" in per_cue[cid]),
-        key=lambda cid: per_cue[cid]["original_us"][0],
+        key=lambda cid: (int(per_cue[cid]["original_us"][0]), cid),
     )
-    jump_threshold = max(2 * tol.good_us, 250_000)
+    jump_threshold_us = max(2 * tol.good_us, BREAK_JUMP_FLOOR_US)
+
+    def applied_correction(cid: str) -> int:
+        c = corrupted_times.get(cid)
+        p = proposed_times.get(cid)
+        if c is None or p is None:
+            return 0
+        return int(p[0]) - int(c[0])
+
+    implied_breaks: list[int] = []
     for a, b in itertools.pairwise(break_order):
-        ra = per_cue[a]["onset_err_final_us"]
-        rb = per_cue[b]["onset_err_final_us"]
-        if abs(rb - ra) > jump_threshold:
-            detected_breaks.append(int(per_cue[b]["original_us"][0]))
+        if abs(applied_correction(b) - applied_correction(a)) > jump_threshold_us:
+            implied_breaks.append(int(per_cue[b]["original_us"][0]))
 
     matched_true = 0
     for tb in case.true_breakpoints_us:
-        if any(abs(db - tb) <= tol.break_match_us for db in detected_breaks):
+        if any(abs(db - tb) <= tol.break_match_us for db in implied_breaks):
             matched_true += 1
     false_breaks = sum(
         1
-        for db in detected_breaks
+        for db in implied_breaks
         if all(abs(db - tb) > tol.break_match_us for tb in case.true_breakpoints_us)
     )
+
+    # Separate question: does the FINAL timeline (accepted, else proposed)
+    # still step at each true breakpoint? For the consecutive cue pair whose
+    # ORIGINAL onsets straddle t, resolved means the final onset residuals on
+    # both sides are equalized within jump_threshold_us (same applied offset);
+    # unresolved means they still step beyond it. No straddling pair ->
+    # conservative unresolved, counted separately.
+    final_order = [
+        (int(per_cue[cid]["original_us"][0]), int(per_cue[cid]["onset_err_final_us"]))
+        for cid in break_order
+    ]
+    resolved_true = 0
+    unresolved_true = 0
+    no_straddle_pair = 0
+    for t in case.true_breakpoints_us:
+        pair = None
+        for i in range(len(final_order) - 1):
+            if final_order[i][0] <= t <= final_order[i + 1][0]:
+                pair = i
+                break
+        if pair is None:
+            no_straddle_pair += 1
+            unresolved_true += 1
+        elif abs(final_order[pair + 1][1] - final_order[pair][1]) > jump_threshold_us:
+            unresolved_true += 1
+        else:
+            resolved_true += 1
 
     offset_recovery = None
     if case.scenario == "S01" and "offset_us" in case.params:
         true_offset = int(case.params["offset_us"])
-        if proposal.mapping_status == "1:1-order-preserving" and regions:
-            est = int(sum(r.get("offset_us", 0) for r in regions) / len(regions))
+        if proposal.mapping_status in OFFSET_RECOVERY_STATUSES and regions:
+            applied_shift = int(
+                sum(r.get("offset_us", 0) for r in regions) / len(regions)
+            )
+            recovered_offset = -applied_shift
             offset_recovery = {
                 "true_offset_us": true_offset,
-                "estimated_correction_us": -est,
-                "convention": "correction is the applied shift; exact recovery means est == -true_offset",
-                "residual_us": abs(est + true_offset),
+                "applied_shift_us": applied_shift,
+                "recovered_offset_us": recovered_offset,
+                "residual_us": abs(recovered_offset - true_offset),
+                "convention": (
+                    "applied shift is what the candidate moved the subtitles "
+                    "(proposed - corrupted); exact recovery means "
+                    "applied_shift == -true_offset"
+                ),
             }
 
     return {
-        "schema_version": 1,
+        "schema_version": SCORE_SCHEMA_VERSION,
         "case_id": case.case_id,
         "scenario": case.scenario,
         "candidate_id": proposal.candidate_id,
@@ -248,9 +316,20 @@ def score_case(
         },
         "discontinuities": {
             "true_breakpoints": len(case.true_breakpoints_us),
-            "detected_breakpoints": len(detected_breaks),
+            "jump_threshold_us": jump_threshold_us,
+            "detected_breakpoints": len(implied_breaks),
+            "implied_breakpoint_times_us": implied_breaks,
             "matched_true_breakpoints": matched_true,
             "false_positive_breakpoints": false_breaks,
+            "unresolved_true_breakpoints": unresolved_true,
+            "resolved_true_breakpoints": resolved_true,
+            "true_breakpoints_without_straddle_pair": no_straddle_pair,
+            "unresolved_rule": (
+                "a true breakpoint is unresolved when the final onset residuals "
+                "of the straddling cue pair (original onset order) still step "
+                "beyond jump_threshold_us; equalized within it means resolved; "
+                "no straddling pair counts unresolved conservatively"
+            ),
         },
         "offset_recovery": offset_recovery,
         "per_cue": per_cue,
