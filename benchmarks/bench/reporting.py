@@ -89,11 +89,38 @@ def build_report(
                 f"- `{s['candidate_id']}` discontinuities: candidate-implied breakpoints "
                 f"{dis['detected_breakpoints']} (matched {dis['matched_true_breakpoints']} "
                 f"of {dis['true_breakpoints']} true, false-positive "
-                f"{dis['false_positive_breakpoints']}, jump threshold "
+                f"{dis['false_positive_breakpoints']}, ambiguous "
+                f"{dis.get('ambiguous_breakpoints', 0)}, jump threshold "
                 f"{dis['jump_threshold_us'] / 1000:.0f} ms); final timeline still "
                 f"discontinuous at {dis['unresolved_true_breakpoints']} of "
                 f"{dis['true_breakpoints']} true breakpoints "
                 f"({dis['true_breakpoints_without_straddle_pair']} without a straddling cue pair)"
+            )
+        for s in case_scores:
+            dis = s["discontinuities"]
+            matched = dis.get("matched_breaks", [])
+            if not matched:
+                continue
+            parts = []
+            for m in matched:
+                precise = (
+                    f"precise ±{m['precise_residual_us'] / 1000:.0f} ms"
+                    if m.get("precise_within_tol")
+                    else "localization uncertain"
+                )
+                parts.append(
+                    "true {tb:.2f} s in bracket [{bs:.2f}, {be:.2f}] s "
+                    "(width {w:.2f} s; {precise})".format(
+                        tb=m["true_breakpoint_us"] / 1_000_000,
+                        bs=m["bracket_start_us"] / 1_000_000,
+                        be=m["bracket_end_us"] / 1_000_000,
+                        w=m["bracket_width_us"] / 1_000_000,
+                        precise=precise,
+                    )
+                )
+            lines.append(
+                f"- `{s['candidate_id']}` breakpoint localization (bracketing anchors, "
+                "credit from the bracket not the time tolerance): " + "; ".join(parts)
             )
         for s in case_scores:
             if s.get("offset_recovery"):

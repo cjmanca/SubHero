@@ -715,12 +715,12 @@ def cmd_run(args, paths) -> int:
                 transcriber,
                 args.language,
                 args.seed,
-                audio_stream=audio_stream,
                 verifier=verifier,
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())
             write_json(va_dir / "proposal.json", base_proposal.to_json())
+            source_media = Path(sources["sources"][case.source_id]["media_path"])
             write_json(
                 va_dir / "run.json",
                 {
@@ -732,6 +732,10 @@ def cmd_run(args, paths) -> int:
                     "reason": acc.notes,
                     "asr_seconds": acc.asr_seconds,
                     "asr_calls": acc.asr_calls,
+                    # Provenance: which source audio stream the decoded
+                    # reference.wav (validated windows' sole input) came from.
+                    "audio_stream": audio_stream,
+                    "media_sha256": sha256_file(source_media),
                 },
             )
             print(f"run {case_id}/b1-va: {acc.status} (base {base})")

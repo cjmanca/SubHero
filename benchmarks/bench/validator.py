@@ -174,13 +174,15 @@ def validate_proposal(
     transcriber,
     language: str,
     seed: int,
-    audio_stream: str | None = None,
     verifier=None,
 ) -> AcceptanceRecord:
     """Validate a base arm's proposals with targeted ASR windows.
 
-    ``audio_stream`` is the ffmpeg map string (e.g. ``0:a:1``) for the source's
-    registered audio track; ``None`` keeps legacy behavior (``0:a:0``).
+    ``reference_media`` is the ALREADY-DECODED single-stream ``reference.wav``
+    produced from the source's selected audio track at preprocessing time;
+    window extraction always reads stream 0 of that WAV. The source-container
+    stream-selection string (``0:a:<sidx>``) must never be threaded here:
+    re-selecting a second stream on a one-stream WAV fails closed.
     ``verifier`` is an optional semantic verifier (translation-tolerant) used
     ONLY for cross-language samples; transcription and verification are
     independently configured boundaries.
@@ -239,7 +241,6 @@ def validate_proposal(
                 wav,
                 max(0.0, (start_us - PAD_US) / 1_000_000),
                 (end_us + PAD_US) / 1_000_000,
-                audio_stream=audio_stream,
             )
             result = transcriber.transcribe_window(wav, language, key=cid)
         except Exception as exc:  # noqa: BLE001 -- boundary failures are abstentions, not passes

@@ -49,6 +49,64 @@ def _decode(media, stream: str, out) -> str:
     return sha256_file(out)
 
 
+def _decode_window(media, stream: str, start_s: float, end_s: float, out) -> Path:
+    """Direct window decode with the same ffmpeg flags bench.media uses."""
+    _ffmpeg(
+        "-ss",
+        f"{start_s:.3f}",
+        "-to",
+        f"{end_s:.3f}",
+        "-i",
+        str(media),
+        "-map",
+        stream,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-f",
+        "wav",
+        str(out),
+    )
+    return out
+
+
+def _pcm_samples(path) -> object:
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(path), "rb") as w:
+        n = w.getnframes()
+        data = np.frombuffer(w.readframes(n), dtype="<i2")
+    return data.astype(float)
+
+
+def _dominant_hz(samples) -> float:
+    import numpy as np
+
+    seg = samples[400:]
+    assert len(seg) >= 800, "window has too few in-media samples for a frequency check"
+    k = int(np.argmax(np.abs(np.fft.rfft(seg))))
+    return k * 16000 / len(seg)
+
+
+def _best_corr(a, b, max_lag: int) -> float:
+    import numpy as np
+
+    best = 0.0
+    for lag in range(max_lag + 1):
+        n = min(len(a), len(b) - lag)
+        if n < 800:
+            break
+        x, y = a[:n], b[lag : lag + n]
+        denom = float(np.linalg.norm(x) * np.linalg.norm(y))
+        if denom > 0:
+            best = max(best, float(np.dot(x, y)) / denom)
+    return best
+
+
 def _build_mkv(
     tmp_path,
     name="episode.mkv",
@@ -386,7 +444,16 @@ def test_reference_audio_fails_closed_without_selection(tmp_path):
     assert audio_stream == "0:a:1"
 
 
-def test_validate_proposal_threads_audio_stream(fixture_dir, tmp_path, monkeypatch):
+def test_validate_proposal_windows_use_reference_wav_stream_zero(
+    fixture_dir, tmp_path, monkeypatch
+):
+    """Contract: windows are extracted from the already-decoded reference.wav.
+
+    The source-container stream-selection string (``0:a:<sidx>``) is resolved
+    once at reference decoding; the validator's window extraction must never
+    re-select a source stream on the one-stream WAV (persisted-selection and
+    legacy sources alike read stream 0).
+    """
     from bench import validator
     from bench.asr import MockTranscriber
     from bench.corrupt import prepare_case
@@ -426,10 +493,9 @@ def test_validate_proposal_threads_audio_stream(fixture_dir, tmp_path, monkeypat
         mock,
         "und",
         1,
-        audio_stream="0:a:1",
     )
     assert calls
-    assert all(k.get("audio_stream") == "0:a:1" for k in calls)
+    assert all("audio_stream" not in k and k.get("audio_stream") is None for k in calls)
     calls.clear()
     validator.validate_proposal(
         case,
@@ -443,7 +509,194 @@ def test_validate_proposal_threads_audio_stream(fixture_dir, tmp_path, monkeypat
         "und",
         1,
     )
-    assert calls and all(k.get("audio_stream") is None for k in calls)
+    assert calls and all("audio_stream" not in k for k in calls)
+    with pytest.raises(TypeError):
+        validator.validate_proposal(
+            case,
+            proposal,
+            "b1-px-fg",
+            times,
+            cue_text,
+            tmp_path / "ref.wav",
+            tmp_path / "run3",
+            mock,
+            "und",
+            1,
+            audio_stream="0:a:1",
+        )
+
+
+def test_targeted_asr_windows_decode_selected_audio_real_ffmpeg(
+    tmp_path, monkeypatch, fixture_dir
+):
+    """Validator windows come from the selected source audio, proven with real ffmpeg.
+
+    Source registered with `--audio index:1` (880 Hz stream). No monkeypatching
+    of extract_audio_window: the validator extracts windows from the decoded
+    ``reference.wav`` (stream 0) via real ffmpeg. Proof:
+    (a) no window-extraction failures -> no asr_errors.log; abstentions are the
+        labeled mock-transcriber abstentions, not ffmpeg-crash abstentions;
+    (b) every sampled ``asr_<cid>.wav`` exists and contains data;
+    (c) content identity with the SELECTED stream: the reference.wav window
+        byte-matches a deterministic same-input re-decode, and every window
+        overlapping the 2-second media is the 880 Hz tone (dominant frequency
+        ~880, waveform correlation > 0.99 with a direct ``0:a:1`` window
+        decode, < 0.2 with the unselected ``0:a:0`` 440 Hz decode). Exact
+        byte equality between a 44.1k-MKV window decode and a pre-resampled
+        16k reference.wav window decode is mechanically impossible (ffmpeg
+        lands input seeks on container seekpoints: measured lag 24 samples at
+        16k, packet framing 6-7 samples); the full-decode equality
+        reference.wav == direct ``0:a:1`` is asserted byte-exact.
+    (d) the b1-va run.json records the selected audio identity (0:a:1 map
+        string + source media sha256).
+    """
+    from bench import validator
+    from bench.asr import MockTranscriber
+
+    for var in (
+        "BENCH_ASR_BASE_URL",
+        "BENCH_ASR_MODEL",
+        "BENCH_ASR_API_KEY",
+        "BENCH_SEM_VERIFY_BASE_URL",
+        "BENCH_SEM_VERIFY_MODEL",
+        "BENCH_SEM_VERIFY_API_KEY",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    sidecar = tmp_path / "episode.ass"
+    shutil.copy2(fixture_dir / "episode.ass", sidecar)
+    assert (
+        _cli_add(
+            root,
+            media,
+            ["--audio", "index:1", "--subtitle", f"main=sidecar:{sidecar}"],
+        )
+        == 0
+    )
+    assert _record(root, "MS")["audio_selected"]["sidx"] == 1
+
+    assert (
+        cli.main(
+            [
+                "--root",
+                str(root),
+                "case",
+                "prepare",
+                "--source-id",
+                "MS",
+                "--track-id",
+                "main",
+                "--scenario",
+                "S01",
+                "--seed",
+                "2",
+                "--case-id",
+                "VAINT",
+            ]
+        )
+        == 0
+    )
+    base_run = [
+        "--root",
+        str(root),
+        "run",
+        "--case",
+        "VAINT",
+        "--candidate",
+        "b1-n",
+        "--base-candidate",
+        "b1-n",
+    ]
+    assert cli.main(base_run) == 0
+    assert cli.main([*base_run, "--candidate", "b1-va"]) == 0
+
+    run_meta = json.loads(
+        (root / "results" / "VAINT" / "b1-va" / "run.json").read_text(encoding="utf-8")
+    )
+    assert run_meta["audio_stream"] == "0:a:1"
+    assert run_meta["media_sha256"] == sha256_file(media)
+
+    paths_dict = cli._paths(root)
+    sources = cli._load_sources(paths_dict["sources"])
+    case = cli._load_case(cli._lookup_case_path(paths_dict, "VAINT"))
+    ref_wav, audio_stream = cli._get_reference_audio(paths_dict, case, sources)
+    assert audio_stream == "0:a:1"
+    assert sha256_file(ref_wav) == _decode(media, "0:a:1", tmp_path / "direct880.wav")
+
+    corrupted = Track.load(cli._resolve_generated(paths_dict, case), case.fmt)
+    times = corrupted.time_map()
+    cue_text = {c.cue_id: c.text for c in corrupted.cues}
+    ordered = sorted(times, key=lambda cid: times[cid][0])
+    proposed = {
+        cid: (100_000 + 150_000 * i, 150_000 + 150_000 * i)
+        for i, cid in enumerate(ordered)
+    }
+    proposal = ProposalRecord(
+        "VAINT",
+        "b1-px-fg",
+        "1:1-order-preserving",
+        [{"start_us": 0, "end_us": None, "offset_us": 0}],
+        proposed,
+        [],
+    )
+    mock = MockTranscriber({cid: cue_text[cid] for cid in cue_text})
+    va_scratch = root / "results" / "VAINT" / "b1-va-mock"
+    acc = validator.validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        times,
+        cue_text,
+        ref_wav,
+        va_scratch,
+        mock,
+        "und",
+        1,
+    )
+
+    assert acc.status == "abstain"
+    assert acc.sample_cue_ids
+    assert acc.asr_calls == len(acc.sample_cue_ids)
+    assert not (va_scratch / "asr_errors.log").exists()
+    notes = (va_scratch / "asr_notes.log").read_text(encoding="utf-8")
+    assert "mock transcriber used" in notes
+
+    pad = validator.PAD_US
+    overlapping = 0
+    for cid in acc.sample_cue_ids:
+        start_us, end_us = proposal.proposed_times_us[cid]
+        start_s = max(0.0, (start_us - pad) / 1_000_000)
+        end_s = (end_us + pad) / 1_000_000
+        wav = va_scratch / f"asr_{cid}.wav"
+        assert wav.is_file()
+        assert wav.stat().st_size > 44
+        assert sha256_file(wav) == sha256_file(
+            _decode_window(
+                ref_wav, "0:a:0", start_s, end_s, tmp_path / f"cmpref_{cid}.wav"
+            )
+        )
+        if start_s < 1.95:
+            samples = _pcm_samples(wav)
+            assert len(samples) >= 800
+            overlapping += 1
+            assert abs(_dominant_hz(samples) - 880.0) < 20.0
+            sel = _pcm_samples(
+                _decode_window(
+                    media, "0:a:1", start_s, end_s, tmp_path / f"cmp880_{cid}.wav"
+                )
+            )
+            unsel = _pcm_samples(
+                _decode_window(
+                    media, "0:a:0", start_s, end_s, tmp_path / f"cmp440_{cid}.wav"
+                )
+            )
+            assert abs(_dominant_hz(sel) - 880.0) < 20.0
+            assert abs(_dominant_hz(unsel) - 440.0) < 20.0
+            assert _best_corr(samples, sel, 100) > 0.99
+            assert _best_corr(samples, unsel, 100) < 0.2
+    assert overlapping >= 5
 
 
 def test_cmd_run_decodes_selected_audio(tmp_path):

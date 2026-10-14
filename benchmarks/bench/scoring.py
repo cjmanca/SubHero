@@ -13,6 +13,26 @@ Discontinuity semantics (schema_version 2):
   more than jump_threshold_us = max(2 * good_us, BREAK_JUMP_FLOOR_US = 250 ms).
   An unchanged/no-op candidate therefore implies zero breakpoints and gets no
   detection credit (residual steps are NOT detection).
+- Detection credit uses BRACKETING intervals, not a spurious sub-tolerance time
+  estimate: an implied break from the a->b cue-anchor step certifies the
+  DISCONTINUITY LOCATION, i.e. that the repair boundary falls between adjacent
+  cue anchors, in the interval (onset(a), onset(b)]. A candidate-proposed
+  region boundary (a region start_us whose applied offset changes) that lies
+  strictly inside that gap is a finer localization claim and sub-divides the
+  gap into per-boundary sub-brackets. Each bracket (sub-bracket) is matched
+  one-to-one to true breakpoints: exactly one true breakpoint inside -> that
+  break is credited (matched); zero inside -> the implied break is a false
+  positive; two or more inside -> AMBIGUOUS, no automatic credit for any of
+  them, reported via explicit ambiguous counts (never silent). Because the
+  brackets are sub-intervals of a left-open/right-closed partition of the
+  monotone cue-anchor onset sequence, every true breakpoint lies in at most one
+  bracket, so one-to-one matching (one implied break credits at most one true
+  breakpoint; one true breakpoint is credited by at most one implied break)
+  holds structurally and deterministically. Localization is reported per matched
+  pair as the bracketing anchors and interval width (bracket_start_us /
+  bracket_end_us / bracket_width_us); the onset-anchored value is a precise
+  estimate only when it lands within break_match_us of the true breakpoint
+  (precise_within_tol), which coexists with (does not gate) bracket credit.
 - Unresolved true breakpoints answer the separate question "does the FINAL
   (accepted, else proposed) timeline still step at each true breakpoint": for
   the cue pair straddling true breakpoint t in original onset order, it is
@@ -193,20 +213,85 @@ def score_case(
             return 0
         return int(p[0]) - int(c[0])
 
+    def _region_start(region: dict) -> int | None:
+        s = region.get("start_us")
+        return None if s is None else int(s)
+
+    # Candidate-proposed boundaries: region start times where the applied
+    # offset changes. These are the candidate's own localization claims and can
+    # be finer than the cue anchors when it proposes several steps inside one
+    # cue gap (used below to sub-divide a bracketing interval).
+    proposed_edges: list[int] = []
+    prev_offset: int | None = None
+    for region in sorted(
+        regions,
+        key=lambda r: (_region_start(r) is None, _region_start(r) or 0),
+    ):
+        offset = int(region.get("offset_us", 0))
+        start = _region_start(region)
+        if start is not None and prev_offset is not None and offset != prev_offset:
+            proposed_edges.append(start)
+        prev_offset = offset
+    proposed_edges = sorted(set(proposed_edges))
+
+    # A step in applied correction between consecutive cue anchors (a, b]
+    # implies a break; the gap is bounded by onset(a), onset(b) and sub-divided
+    # by proposed_edges strictly inside it. implied_breakpoint_times_us keeps
+    # the cue-anchor b onset (legacy report coordinate); claims are the
+    # per-boundary sub-brackets used for one-to-one detection credit.
     implied_breaks: list[int] = []
+    claims: list[tuple[int, int, int]] = []
     for a, b in itertools.pairwise(break_order):
         if abs(applied_correction(b) - applied_correction(a)) > jump_threshold_us:
-            implied_breaks.append(int(per_cue[b]["original_us"][0]))
+            lo = int(per_cue[a]["original_us"][0])
+            hi = int(per_cue[b]["original_us"][0])
+            implied_breaks.append(hi)
+            interior = [e for e in proposed_edges if lo < e < hi]
+            if interior:
+                # The candidate explains the a->b step with proposed boundaries
+                # strictly inside the gap; each boundary is a per-boundary
+                # localization claim. No trailing claim is emitted at the cue
+                # anchor: the candidate makes no break claim past its last
+                # proposed boundary.
+                bounds = [lo, *interior]
+                for i in range(1, len(bounds)):
+                    claims.append((bounds[i - 1], bounds[i], hi))
+            else:
+                claims.append((lo, hi, hi))
 
-    matched_true = 0
-    for tb in case.true_breakpoints_us:
-        if any(abs(db - tb) <= tol.break_match_us for db in implied_breaks):
-            matched_true += 1
-    false_breaks = sum(
-        1
-        for db in implied_breaks
-        if all(abs(db - tb) > tol.break_match_us for tb in case.true_breakpoints_us)
-    )
+    true_breaks = sorted(int(t) for t in case.true_breakpoints_us)
+    # Bracketing-interval, one-to-one matching (see module docstring). Brackets
+    # are disjoint sub-intervals of a left-open/right-closed partition of the
+    # cue-anchor onsets, so each true breakpoint sits in at most one bracket and
+    # each bracket credits at most one true breakpoint: 1 inside -> matched,
+    # 0 inside -> false positive, >=2 inside -> ambiguous (no auto-credit).
+    matched_breaks: list[dict] = []
+    false_breaks = 0
+    ambiguous_breaks = 0
+    ambiguous_true_breakpoints = 0
+    for bracket_start, bracket_end, anchor in claims:
+        inside = [tb for tb in true_breaks if bracket_start < tb <= bracket_end]
+        if len(inside) == 1:
+            tb = inside[0]
+            residual = abs(anchor - tb)
+            matched_breaks.append(
+                {
+                    "true_breakpoint_us": tb,
+                    "bracket_start_us": bracket_start,
+                    "bracket_end_us": bracket_end,
+                    "bracket_width_us": bracket_end - bracket_start,
+                    "implied_break_us": anchor,
+                    "precise_residual_us": residual,
+                    "precise_within_tol": residual <= tol.break_match_us,
+                }
+            )
+        elif len(inside) == 0:
+            false_breaks += 1
+        else:
+            ambiguous_breaks += 1
+            ambiguous_true_breakpoints += len(inside)
+
+    matched_true = len(matched_breaks)
 
     # Separate question: does the FINAL timeline (accepted, else proposed)
     # still step at each true breakpoint? For the consecutive cue pair whose
@@ -322,9 +407,23 @@ def score_case(
             "implied_breakpoint_times_us": implied_breaks,
             "matched_true_breakpoints": matched_true,
             "false_positive_breakpoints": false_breaks,
+            "ambiguous_breakpoints": ambiguous_breaks,
+            "ambiguous_true_breakpoints": ambiguous_true_breakpoints,
+            "matched_breaks": matched_breaks,
             "unresolved_true_breakpoints": unresolved_true,
             "resolved_true_breakpoints": resolved_true,
             "true_breakpoints_without_straddle_pair": no_straddle_pair,
+            "matching_rule": (
+                "an implied break from the a->b cue-anchor step is credited to "
+                "the true breakpoints in the bracketing interval "
+                "(onset(a), onset(b)], sub-divided by candidate-proposed region "
+                "boundaries strictly inside the gap; exactly one true "
+                "breakpoint in a bracket -> matched (localization = bracketing "
+                "anchors and width), zero -> false positive, two or more -> "
+                "ambiguous with no automatic credit; brackets are disjoint so "
+                "matching is one-to-one; detection credit comes from the "
+                "bracket, not from the break_match_us time tolerance"
+            ),
             "unresolved_rule": (
                 "a true breakpoint is unresolved when the final onset residuals "
                 "of the straddling cue pair (original onset order) still step "

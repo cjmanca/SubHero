@@ -95,6 +95,76 @@ def _piecewise_regions(offsets: dict[str, int]) -> list[dict]:
     return regions
 
 
+def _gap_s03_case() -> CaseManifest:
+    """S03 with two discontinuities in subtitle-free gaps (between cue onsets).
+
+    Cue onsets at 1/10/12/30/32/50 s. True breakpoints at 8 s and 28 s, i.e.
+    strictly inside the (1,10] and (12,30] gaps. Region offsets injected: 0 for
+    t<8s, +3s for 8s..28s, +6s for t>=28s.
+    """
+    original = {
+        f"e{i:04d}": (start, start + 1_000_000)
+        for i, start in enumerate(
+            [1_000_000, 10_000_000, 12_000_000, 30_000_000, 32_000_000, 50_000_000]
+        )
+    }
+    region_offset = {
+        "e0000": 0,
+        "e0001": 3_000_000,
+        "e0002": 3_000_000,
+        "e0003": 6_000_000,
+        "e0004": 6_000_000,
+        "e0005": 6_000_000,
+    }
+    injected = {cid: (off, off) for cid, off in region_offset.items()}
+    return CaseManifest(
+        case_id="gap-s03",
+        source_id="GAP",
+        scenario="S03",
+        seed=0,
+        track_id="episode",
+        fmt="ass",
+        grid_us=10_000,
+        params={
+            "scenario": "S03",
+            "boundaries_us": [8_000_000, 28_000_000],
+            "jump_offsets_us": [3_000_000, 3_000_000],
+        },
+        transform={},
+        expected_inverse={},
+        injected_cue_deltas=injected,
+        original_times_us=original,
+        true_breakpoints_us=[8_000_000, 28_000_000],
+        original_subtitle_sha256="0" * 64,
+        generated_subtitle_sha256="0" * 64,
+        generated_path="gen.ass",
+    )
+
+
+def _perfect_inverse(case: CaseManifest, candidate_id: str = "b1-ideal"):
+    """A candidate applying the exact per-cue inverse of the injection."""
+    corrupted = _corrupted_from_manifest(case)
+    original = {cid: (int(s), int(e)) for cid, (s, e) in case.original_times_us.items()}
+    applied = {cid: original[cid][0] - corrupted[cid][0] for cid in corrupted}
+    proposed = {
+        cid: (corrupted[cid][0] + applied[cid], corrupted[cid][1] + applied[cid])
+        for cid in corrupted
+    }
+    assert proposed == original
+    return (
+        corrupted,
+        ProposalRecord(
+            case.case_id,
+            candidate_id,
+            "1:1-order-preserving",
+            _piecewise_regions(applied),
+            proposed,
+            [],
+            "",
+        ),
+    )
+
+
 # --- A1: an unchanged candidate implies NO breakpoints and gets no credit ---
 
 
@@ -285,6 +355,157 @@ def test_unresolved_field_uses_final_accepted_state_separate_from_detection():
     score_no_acc = score_case(case, noop, corrupted, None, TOL)
     assert score_no_acc["discontinuities"]["unresolved_true_breakpoints"] == 2
     assert score_no_acc["discontinuities"]["resolved_true_breakpoints"] == 0
+
+
+# --- B: bracketing-interval detection credit (F02 gap cases) ---
+
+
+def test_committed_s03_gap_perfect_inverse_gets_full_credit():
+    # Fx00-S03: true breakpoint 45,120,000 sits in the subtitle-free gap
+    # between cue e0018 (onset 45,000,000) and cue e0019 (onset 48,000,000).
+    # A perfect inverse records the break at the next cue onset (48 s), 2.88 s
+    # from the true breakpoint; bracketing credit must NOT penalize the gap.
+    case = _load_committed_case("Fx00-S03")
+    corrupted, perfect = _perfect_inverse(case)
+    score = score_case(case, perfect, corrupted, None, TOL)
+    dis = score["discontinuities"]
+    assert dis["detected_breakpoints"] == 1
+    assert dis["matched_true_breakpoints"] == dis["true_breakpoints"] == 1
+    assert dis["false_positive_breakpoints"] == 0
+    assert dis["ambiguous_breakpoints"] == 0
+    assert dis["ambiguous_true_breakpoints"] == 0
+    (mb,) = dis["matched_breaks"]
+    assert mb["true_breakpoint_us"] == 45_120_000
+    assert mb["bracket_start_us"] == 45_000_000  # prior cue anchor e0018
+    assert mb["bracket_end_us"] == 48_000_000  # next cue anchor e0019
+    assert mb["bracket_width_us"] == 3_000_000  # localization uncertainty
+    assert mb["implied_break_us"] == 48_000_000
+    assert mb["precise_residual_us"] == 2_880_000
+    assert mb["precise_within_tol"] is False  # 2.88 s > break_match_us
+    assert dis["unresolved_true_breakpoints"] == 0
+    assert dis["resolved_true_breakpoints"] == 1
+
+
+def test_committed_s03_gap_noop_gets_zero_credit():
+    case = _load_committed_case("Fx00-S03")
+    corrupted = _corrupted_from_manifest(case)
+    noop = ProposalRecord(
+        case.case_id, "b1-n", "noop", [], dict(corrupted), [], "no changes proposed"
+    )
+    dis = score_case(case, noop, corrupted, None, TOL)["discontinuities"]
+    assert dis["detected_breakpoints"] == 0
+    assert dis["matched_true_breakpoints"] == 0
+    assert dis["false_positive_breakpoints"] == 0
+    assert dis["ambiguous_breakpoints"] == 0
+
+
+def test_multiple_gap_jumps_repair_gets_full_credit_one_to_one():
+    # Two discontinuities in gaps, both repaired perfectly -> full credit,
+    # one-to-one, zero false positives.
+    case = _gap_s03_case()
+    corrupted, perfect = _perfect_inverse(case)
+    dis = score_case(case, perfect, corrupted, None, TOL)["discontinuities"]
+    assert dis["true_breakpoints"] == 2
+    assert dis["detected_breakpoints"] == 2
+    assert dis["matched_true_breakpoints"] == 2
+    assert dis["false_positive_breakpoints"] == 0
+    assert dis["ambiguous_breakpoints"] == 0
+    credited = sorted(m["true_breakpoint_us"] for m in dis["matched_breaks"])
+    assert credited == [8_000_000, 28_000_000]  # each credited exactly once
+    brackets = {
+        (m["bracket_start_us"], m["bracket_end_us"]) for m in dis["matched_breaks"]
+    }
+    assert brackets == {(1_000_000, 10_000_000), (12_000_000, 30_000_000)}
+
+
+def test_sparse_dialogue_wide_bracket_credits_and_reports_uncertainty():
+    # A jump whose bracketing interval is wide (only two cues, 39 s apart):
+    # credited via the interval, localization uncertainty reflects the bracket.
+    original = {
+        "e0000": (1_000_000, 2_000_000),
+        "e0001": (40_000_000, 41_000_000),
+    }
+    injected = {"e0000": (0, 0), "e0001": (5_000_000, 5_000_000)}
+    case = CaseManifest(
+        case_id="sparse-s03",
+        source_id="SPARSE",
+        scenario="S03",
+        seed=0,
+        track_id="episode",
+        fmt="ass",
+        grid_us=10_000,
+        params={
+            "scenario": "S03",
+            "boundaries_us": [25_000_000],
+            "jump_offsets_us": [5_000_000],
+        },
+        transform={},
+        expected_inverse={},
+        injected_cue_deltas=injected,
+        original_times_us=original,
+        true_breakpoints_us=[25_000_000],
+        original_subtitle_sha256="0" * 64,
+        generated_subtitle_sha256="0" * 64,
+        generated_path="gen.ass",
+    )
+    corrupted, perfect = _perfect_inverse(case)
+    dis = score_case(case, perfect, corrupted, None, TOL)["discontinuities"]
+    assert dis["detected_breakpoints"] == 1
+    assert dis["matched_true_breakpoints"] == 1
+    assert dis["false_positive_breakpoints"] == 0
+    (mb,) = dis["matched_breaks"]
+    assert mb["bracket_start_us"] == 1_000_000
+    assert mb["bracket_end_us"] == 40_000_000
+    assert mb["bracket_width_us"] == 39_000_000
+    assert mb["precise_within_tol"] is False
+
+
+def test_ambiguous_interval_no_auto_credit_and_counted():
+    # Two true breakpoints in one cue gap with NO proposed sub-boundary: the
+    # single cue-anchor implied break cannot uniquely localize them -> no
+    # automatic credit, reported as an explicit ambiguous abstention (0 matched,
+    # 0 false positives, 2 true breakpoints abstained).
+    original = {
+        "e0000": (1_000_000, 2_000_000),
+        "e0001": (40_000_000, 41_000_000),
+        "e0002": (50_000_000, 51_000_000),
+    }
+    injected = {
+        "e0000": (0, 0),
+        "e0001": (5_000_000, 5_000_000),
+        "e0002": (5_000_000, 5_000_000),
+    }
+    case = CaseManifest(
+        case_id="ambiguous-s03",
+        source_id="AMB",
+        scenario="S03",
+        seed=0,
+        track_id="episode",
+        fmt="ass",
+        grid_us=10_000,
+        params={
+            "scenario": "S03",
+            "boundaries_us": [10_000_000, 20_000_000],
+            "jump_offsets_us": [5_000_000, 0],
+        },
+        transform={},
+        expected_inverse={},
+        injected_cue_deltas=injected,
+        original_times_us=original,
+        true_breakpoints_us=[10_000_000, 20_000_000],
+        original_subtitle_sha256="0" * 64,
+        generated_subtitle_sha256="0" * 64,
+        generated_path="gen.ass",
+    )
+    corrupted, perfect = _perfect_inverse(case)
+    dis = score_case(case, perfect, corrupted, None, TOL)["discontinuities"]
+    assert dis["true_breakpoints"] == 2
+    assert dis["detected_breakpoints"] == 1
+    assert dis["matched_true_breakpoints"] == 0  # no automatic credit
+    assert dis["false_positive_breakpoints"] == 0  # not a spurious break
+    assert dis["ambiguous_breakpoints"] == 1
+    assert dis["ambiguous_true_breakpoints"] == 2
+    assert dis["matched_breaks"] == []
 
 
 # --- C: offset recovery sign convention, pinned on committed Fx00-S01 data ---
