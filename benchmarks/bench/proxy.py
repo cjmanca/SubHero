@@ -45,7 +45,14 @@ def classify_cue(cue: Cue, gold: dict[str, str] | None = None) -> str:
     """Conservative speech-like vs non-speech classification.
 
     Gold classification labels (from verified fixture/corpus annotations)
-    take precedence when the corpus provides them for benchmark use.
+    take precedence when the corpus provides them for benchmark use. This is
+    evaluation reference data: DEFAULT candidates must never receive gold
+    labels, because that leaks ground-truth answers into ordinary
+    synchronization candidates. The control lives at the cli/adapters
+    boundary — `run_candidate` accepts a gold path only for the
+    oracle-assisted diagnostic arms (b1-pxo-*) and ignores it for every
+    default candidate, including b1-px-fg/b1-px-fp, which classify anchors
+    with these heuristics only.
     """
     if gold is not None and cue.cue_id in gold:
         return gold[cue.cue_id]

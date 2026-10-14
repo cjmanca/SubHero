@@ -19,24 +19,53 @@ from .manifests import CaseManifest, ProposalRecord
 from .paths import ensure_scratch_path
 from .proxy import ProxyMapping, build_proxy, fit_regions
 
-CANDIDATES = {
-    "b1-n": ("noop", "No-op baseline"),
-    "b1-fg": ("ffsubsync-global", "ffsubsync global synchronization"),
+CANDIDATES: dict[str, tuple[str, str, dict]] = {
+    "b1-n": ("noop", "No-op baseline", {"oracle": False, "default": True}),
+    "b1-fg": (
+        "ffsubsync-global",
+        "ffsubsync global synchronization",
+        {"oracle": False, "default": True},
+    ),
     "b1-fp": (
         "ffsubsync-piecewise",
         "ffsubsync experimental piecewise (--split-penalty)",
+        {"oracle": False, "default": True},
     ),
-    "b1-al": ("alass", "ALASS synchronization"),
-    "b1-px-fg": ("proxy-ffsubsync-global", "dialogue-only proxy + ffsubsync global"),
+    "b1-al": ("alass", "ALASS synchronization", {"oracle": False, "default": True}),
+    "b1-px-fg": (
+        "proxy-ffsubsync-global",
+        "dialogue-only proxy + ffsubsync global",
+        {"oracle": False, "default": True},
+    ),
     "b1-px-fp": (
         "proxy-ffsubsync-piecewise",
         "dialogue-only proxy + ffsubsync piecewise",
+        {"oracle": False, "default": True},
+    ),
+    "b1-pxo-fg": (
+        "proxy-ffsubsync-global-gold-labels",
+        "DIAGNOSTIC: dialogue proxy with GOLD cue labels + ffsubsync global",
+        {"oracle": True, "default": False},
+    ),
+    "b1-pxo-fp": (
+        "proxy-ffsubsync-piecewise-gold-labels",
+        "DIAGNOSTIC: dialogue proxy with GOLD cue labels + ffsubsync piecewise",
+        {"oracle": True, "default": False},
     ),
     "b1-va": (
         "targeted-asr-validation",
         "targeted-ASR semantic validation of a proposal arm",
+        {"oracle": False, "default": False},
     ),
 }
+DEFAULT_CANDIDATE_IDS = [cid for cid, meta in CANDIDATES.items() if meta[2]["default"]]
+ORACLE_DIAGNOSTIC_IDS = tuple(
+    cid for cid, meta in CANDIDATES.items() if meta[2]["oracle"]
+)
+ORACLE_MARKER = (
+    "oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; "
+    "not a default candidate)"
+)
 
 
 @dataclass
@@ -152,6 +181,15 @@ def run_candidate(
     tol_us: int,
     gold_classification_path: Path | None = None,
 ) -> tuple[ProposalRecord, dict]:
+    """Run one candidate arm.
+
+    GOLD-LEAKAGE BOUNDARY: the gold cue-classification path is reference
+    evaluation data. It is consumed ONLY by the oracle-assisted diagnostic
+    arms (`b1-pxo-*`). For every default candidate — including the default
+    proxy arms `b1-px-fg`/`b1-px-fp` — the gold path is ignored here, so
+    anchor selection uses only the conservative heuristics; callers cannot
+    leak gold labels into default arms by passing the path.
+    """
     meta: dict = {
         "candidate_id": candidate_id,
         "tool_versions": {},
@@ -160,6 +198,7 @@ def run_candidate(
     }
     scratch_dir.mkdir(parents=True, exist_ok=True)
     timeout = tools.timeouts.get(candidate_id, 900)
+    is_oracle = candidate_id in ORACLE_DIAGNOSTIC_IDS
 
     if candidate_id == "b1-n":
         regions = [
@@ -184,7 +223,7 @@ def run_candidate(
 
     if candidate_id in ("b1-fg", "b1-fp"):
         use_proxy = False
-    elif candidate_id in ("b1-px-fg", "b1-px-fp"):
+    elif candidate_id in ("b1-px-fg", "b1-px-fp", "b1-pxo-fg", "b1-pxo-fp"):
         use_proxy = True
     elif candidate_id == "b1-al":
         use_proxy = False
@@ -230,7 +269,7 @@ def run_candidate(
                 _reload_track(corrupted_path, case.fmt),
                 proxy_srt,
                 scratch_dir / "proxy_mapping.json",
-                gold_classification_path,
+                gold_classification_path if is_oracle else None,
             )
             meta["preprocessing_seconds"] += time.monotonic() - t0
             if not mapping.proxy_index_to_cue:
@@ -312,13 +351,19 @@ def run_candidate(
             return rec, meta
 
         times = _load_events(out_srt, out_fmt)
+        notes = (
+            f"ffsubsync {mode}; full-track flattened timing proposals only "
+            "(formatting never applied to originals)"
+        )
+        if is_oracle:
+            notes = f"{notes}; {ORACLE_MARKER}"
         rec = _proposal_for_indices(
             case,
             times,
             mapping,
             corrupted_times,
             tol_us,
-            notes=f"ffsubsync {mode}; full-track flattened timing proposals only (formatting never applied to originals)",
+            notes=notes,
             full_track_ids=full_ids,
         )
         rec.candidate_id = candidate_id

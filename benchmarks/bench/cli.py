@@ -12,7 +12,13 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .adapters import CANDIDATES, ToolConfig, run_candidate
+from .adapters import (
+    CANDIDATES,
+    DEFAULT_CANDIDATE_IDS,
+    ORACLE_DIAGNOSTIC_IDS,
+    ToolConfig,
+    run_candidate,
+)
 from .asr import get_transcriber
 from .corrupt import prepare_case
 from .manifests import CaseManifest, ProposalRecord, read_json, write_json
@@ -520,9 +526,19 @@ def _get_reference_audio(
     return ref_wav, audio_stream
 
 
+def _all_candidate_ids() -> list[str]:
+    """Candidates executed by `--all`: default arms only.
+
+    Oracle-assisted diagnostic arms (b1-pxo-*) are excluded from `--all` and
+    must be selected explicitly with `--candidate`; b1-va keeps its special
+    base-proposal handling.
+    """
+    return [cid for cid in CANDIDATES if cid in DEFAULT_CANDIDATE_IDS]
+
+
 def cmd_run(args, paths) -> int:
     sources = _load_sources(paths["sources"])
-    candidates = list(CANDIDATES) if args.all else args.candidate
+    candidates = _all_candidate_ids() if args.all else args.candidate
     tools = ToolConfig.detect()
     rc = 0
     for case_id in args.case:
@@ -552,6 +568,15 @@ def cmd_run(args, paths) -> int:
             if cand == "b1-va":
                 continue
             scratch_dir = paths["results"] / case_id / cand
+            # GOLD-LEAKAGE BOUNDARY: gold cue labels are reference evaluation
+            # data; only oracle-assisted diagnostic arms receive the path.
+            # Default candidates (including b1-px-fg/b1-px-fp) get None here
+            # and adapters.py independently refuses it for default ids.
+            cand_gold_path = None
+            if cand in ORACLE_DIAGNOSTIC_IDS and case.gold_classification_path:
+                cand_gold_path = _resolve_under_root(
+                    paths, case.gold_classification_path
+                )
             proposal, meta = run_candidate(
                 cand,
                 case,
@@ -561,11 +586,7 @@ def cmd_run(args, paths) -> int:
                 scratch_dir,
                 tools,
                 tol_us=args.tol_good_us,
-                gold_classification_path=(
-                    _resolve_under_root(paths, case.gold_classification_path)
-                    if case.gold_classification_path
-                    else None
-                ),
+                gold_classification_path=cand_gold_path,
             )
             write_json(scratch_dir / "proposal.json", proposal.to_json())
             write_json(

@@ -108,8 +108,24 @@ spec is **refused**: ffmpeg `-map 0:s:<n>` counts subtitle streams while
 | `b1-fg` | ffsubsync global | timing proposals extracted from tool output only |
 | `b1-fp` | ffsubsync piecewise | passes `--split-penalty 5`; capability probed from installed version |
 | `b1-al` | ALASS | positional CLI; `unsupported` when binary absent |
-| `b1-px-fg` / `b1-px-fp` | dialogue-only proxy + ffsubsync | gold/heuristic classification excludes signs/karaoke/SDH anchors; cue-ID map recorded; anchorless tracks abstain |
+| `b1-px-fg` / `b1-px-fp` | dialogue-only proxy + ffsubsync | **heuristic-only anchor classification** (karaoke/music/style/brackets); gold cue labels are never supplied to these arms; cue-ID map recorded; anchorless tracks abstain |
+| `b1-pxo-fg` / `b1-pxo-fp` | **Oracle-assisted DIAGNOSTIC**: dialogue proxy using **GOLD cue labels** + ffsubsync | upper-bound reference only: anchor selection comes from the benchmark's own gold annotations; every proposal/run record carries an explicit `oracle-assisted diagnostic arm` marker; **excluded from `--all`** and from default candidates; select explicitly (`--candidate b1-pxo-fg`) |
 | `b1-va` | targeted-ASR validation | validates a base arm's proposals; `not_run` without a configured local endpoint |
+
+### Gold-label leakage boundary
+
+Gold cue-classification files are **reference evaluation data**. Default
+candidates must never derive anchor choices from them, and the harness
+enforces this at two boundaries: `run` passes the gold path **only** to the
+oracle diagnostic arms, and `run_candidate` independently ignores any gold
+path supplied for every default candidate (including the default proxy
+arms). Consequences: `--all` runs exactly the six default arms
+(`b1-n`, `b1-fg`, `b1-fp`, `b1-al`, `b1-px-fg`, `b1-px-fp`) plus the
+special-cased `b1-va`; oracle arms appear only when named explicitly and
+are labeled in proposal notes, `run.json` reasons, and scoring. Scoring
+itself never consumes gold files (gold labels play no role in timing,
+breakpoint, or offset metrics); case manifests keep
+`gold_classification_path` solely as evaluation metadata.
 
 ## Targeted ASR boundary (`b1-va`)
 
@@ -186,7 +202,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 78 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 98 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 
