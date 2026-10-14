@@ -31,6 +31,16 @@
 - `PLAN.md` immutable; no Git pushes without authorization; local commits by orchestrator after accepted slices.
 - G0/G1 remain **blocked** (real known-good episodes E01/E02 not supplied). No gate claims; no invented thresholds; findings updated only with genuinely executed measurements.
 
-## Next action
+## Final verification — canonical fixture matrix (genuinely executed 2026-10-14, default root, CWD repo root)
 
-Delegate M1 (private benchmark data protection) as a bounded brief: `.gitignore` + `benchmarks/private/` layout + CLI registration safeguards + `git check-ignore`/`status`/`ls-files` validation + tests.
+- Registration: Fx00 re-registered (`episode`/`signs` sidecars + golds, synthetic rights) with persisted `audio_selected` (`0:a:0`). **Incident:** `benchmarks/cases/sources.json` (git-ignored local registry) was deleted by the orchestrator during matrix setup to re-register with canonical track ids; a delegated session reconstructed it byte-exact (hash-verified) before re-registration; suite now self-guards the real registry bytes. Root cause was this authorized local regeneration, not a harness defect; file is regenerable via the documented `source add` command.
+- Case regeneration determinism: all 7 canonical case manifests re-prepared **byte-identical** to the committed versions (git diff empty).
+- Matrix: `run --all` (7 cases) + explicit oracle arms `b1-pxo-fg/b1-pxo-fp` (7 cases) + `score --all` + `report` — all executed against real ffsubsync 0.5.1; ALASS `unsupported`; `b1-va` `not_run` (no ASR/verifier endpoints configured).
+- Genuine observations: (1) **M3:** `b1-n` gets zero breakpoint-detection credit everywhere (e.g. S03: implied 0, matched 0, unresolved 1/1 — the old residual-domain scorer granted it free credit); S01 offset recovery sign-pinned (`b1-fg`/`b1-px-fg`: true 1900 ms, applied −1900 ms, residual 0 ms; `b1-n`: applied 0, residual 1900 ms). (2) **M4:** `b1-pxo-*` notes carry the oracle marker, default px arms do not; pxo excluded from `--all`; SGN01 signs track: all proxy arms `abstain_no_speech_anchors` (heuristic and gold labels agree that track is all non-speech). (3) **M6 live-tool evidence:** `b1-fg`/`b1-fp` on S03/S04 → `mapping_failure_ambiguous_text` (same event counts, text re-attached at shifted positions: “input 'That is the third time today.' vs output 'I will make fresh leaves.'” at cue e0016, 24 vs 24) and SGN01 `b1-fg` → `mapping_failure_count_mismatch` (5 inputs → 1 output): real ffsubsync rewrites event structure in these flows, which the pre-M6 positional mapping silently guessed. Arms abstain visibly; no proposals scored from guessed correspondence. (4) Negative control intact: SGN01 full-track `b1-fp` proposes harmful accepted corrections (median final onset err 3636 ms) while proxy arms abstain — signs-only tracks protected.
+- Committed `benchmarks/reports/Fx00-plumbing-report.md` regenerated from this executed run (no thresholds, no acceptance claims).
+
+## Outstanding findings
+
+- G0/G1 remain **blocked**: E01/E02 known-good episodes not supplied; real-media benchmarking readiness = documented procedure in `benchmarks/README.md` + `benchmarks/private/README.md` (private home, stream selection required for multi-audio, gold annotations evaluation-only, semantic verifier env boundary).
+- ffsubsync full-track event rewriting on S03/S04/SGN01 means full-track arms' real capability must be re-measured on real media with correspondence-preserving flows, or recorded as proxy-arm-only comparison (findings doc notes this).
+- Historical (pre-correction) synthetic scores in old reports/findings are superseded by this re-run.

@@ -199,6 +199,16 @@ Private-data home and CLI protection (enforced, not just policy):
   path that resolves inside the repository outside `benchmarks/private/` and the
   synthetic `benchmarks/fixtures/` home (exit 2, nothing registered, no partial writes).
   Paths outside the repository (e.g. read-only mounts) are allowed and recommended.
+  Path semantics (single coherent rule): **user-given relative paths** (media `--path`,
+  `sidecar:` targets, gold targets) are resolved from the **current working directory** —
+  the policy check evaluates the exact resolved path the consumers will open, so the
+  documented registration works from the repo root and relative specs are stored
+  unchanged; harness-stored manifest paths (`generated_path`,
+  `gold_classification_path` in case manifests) are root-relative and resolved
+  against the benchmarks root at run time. The allowed in-repo homes
+  (`benchmarks/private/`, `benchmarks/fixtures/`) are anchored to the repository
+  layout, so a temporary `--root` registry can legitimately reference repository
+  fixtures while in-repo escapes (`benchmarks/cases/…`, repo roots) stay refused.
 - Case manifests are routed by rights: only `redistributable-synthetic-fixture` sources
   write `.case.json` manifests into the committed `benchmarks/cases/` directory; all
   other sources (e.g. `private-local`) write under `benchmarks/private/cases/`.

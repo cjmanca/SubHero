@@ -168,6 +168,17 @@ def _resolve_audio_selection(spec: str | None, streams: list[dict]) -> dict | No
     return None
 
 
+def _resolve_user_path(raw: str) -> Path:
+    """Canonical resolution for USER-GIVEN relative paths: from the current
+    working directory, exactly as consumers (`Path(spec)` in
+    `cmd_case_prepare`/`_verify_sources`/`prepare_case`) will open them.
+    The private-data policy must evaluate this exact resolved path.
+    Harness-stored manifest paths are root-relative and resolved at run time
+    by `_resolve_under_root`; they are internal and unaffected.
+    """
+    return Path(raw).resolve()
+
+
 def _private_path_policy(
     candidate: Path, benchmarks_root: Path, repo_root: Path
 ) -> str | None:
@@ -176,12 +187,23 @@ def _private_path_policy(
     Paths outside the repository (e.g. read-only mounts) are allowed. Inside the repo,
     registered media, sidecar subtitles, and gold annotations must live under
     ``benchmarks/private/`` (real reference episodes) or ``benchmarks/fixtures/``
-    (redistributable synthetic fixtures).
+    (redistributable synthetic fixtures) of the REPOSITORY layout, plus the
+    ``private/`` and ``fixtures/`` homes of the active benchmarks root (they
+    coincide when the root is the repository's benchmarks directory, and both
+    apply when working with a temporary ``--root``).
+    The candidate must be the exact resolved path the consumers will open
+    (CWD-joined for user-given relative paths).
     """
     resolved = Path(candidate).resolve()
     if not _under_root(resolved, repo_root):
         return None
-    for home in (benchmarks_root / "private", benchmarks_root / "fixtures"):
+    homes = [
+        Path(repo_root) / "benchmarks" / "private",
+        Path(repo_root) / "benchmarks" / "fixtures",
+        Path(benchmarks_root) / "private",
+        Path(benchmarks_root) / "fixtures",
+    ]
+    for home in homes:
         if _under_root(resolved, home):
             return None
     return (
@@ -287,12 +309,11 @@ def cmd_source_add(args, paths) -> int:
     for spec in args.subtitle or []:
         _, _, target = spec.partition("=")
         if target.startswith("sidecar:"):
-            policy_targets.append(
-                _resolve_under_root(paths, target.removeprefix("sidecar:"))
-            )
+            # Same resolution the consumers use: CWD-joined, then resolved.
+            policy_targets.append(_resolve_user_path(target.removeprefix("sidecar:")))
     for gold_spec in args.gold or []:
         _, _, target = gold_spec.partition("=")
-        policy_targets.append(_resolve_under_root(paths, target))
+        policy_targets.append(_resolve_user_path(target))
     for target in policy_targets:
         reason = _private_path_policy(target, paths["root"], REPO_ROOT)
         if reason is not None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -141,6 +142,106 @@ def test_source_add_refuses_in_repo_gold_outside_allowed(tmp_path, capsys):
     assert "REFUSED (private data policy)" in captured.err
     assert sources_path.read_bytes() == before
     assert not (BENCH_ROOT / "transcripts").exists()
+
+
+def test_relative_sidecar_registration_from_repo_root_matches_documented_flow(
+    tmp_path, monkeypatch, capsys
+):
+    """The README-documented relative registration command must work from repo root CWD."""
+    root = tmp_path / "benchroot"
+    real_registry = BENCH_ROOT / "cases" / "sources.json"
+    before = real_registry.read_bytes() if real_registry.exists() else None
+    monkeypatch.chdir(REPO_ROOT)
+    rc = cli.main(
+        [
+            "--root",
+            str(root),
+            "source",
+            "add",
+            "--path",
+            "benchmarks/fixtures/Fx00/reference.wav",
+            "--source-id",
+            "Fx00",
+            "--subtitle",
+            "episode=sidecar:benchmarks/fixtures/Fx00/episode.ass",
+            "--subtitle",
+            "signs=sidecar:benchmarks/fixtures/Fx00/signs.ass",
+            "--gold",
+            "episode=benchmarks/fixtures/Fx00/gold_episode.json",
+            "--gold",
+            "signs=benchmarks/fixtures/Fx00/gold_signs.json",
+            "--rights",
+            "redistributable-synthetic-fixture",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out + captured.err
+    registry = root / "cases" / "sources.json"
+    assert registry.is_file()
+    record = json.loads(registry.read_text(encoding="utf-8"))["sources"]["Fx00"]
+    # specs stored exactly as given
+    assert record["subtitle_specs"]["episode"] == (
+        "sidecar:benchmarks/fixtures/Fx00/episode.ass"
+    )
+    assert record["subtitle_specs"]["signs"] == (
+        "sidecar:benchmarks/fixtures/Fx00/signs.ass"
+    )
+    assert record["gold_classification"]["episode"] == (
+        "benchmarks/fixtures/Fx00/gold_episode.json"
+    )
+    # media path resolved absolutely as before
+    assert Path(record["media_path"]).is_absolute()
+    # real committed registry untouched by this tmp-root flow
+    after = real_registry.read_bytes() if real_registry.exists() else None
+    assert before == after
+
+
+def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "benchroot2"
+    monkeypatch.chdir(BENCH_ROOT)
+    # relative from benchmarks CWD -> allowed fixtures home
+    rc = cli.main(
+        [
+            "--root",
+            str(root),
+            "source",
+            "add",
+            "--path",
+            "fixtures/Fx00/reference.wav",
+            "--source-id",
+            "FXREL",
+            "--subtitle",
+            "main=sidecar:fixtures/Fx00/episode.ass",
+            "--rights",
+            "private-local",
+        ]
+    )
+    assert rc == 0
+    assert (root / "cases" / "sources.json").is_file()
+    capsys.readouterr()
+    # relative escaping: ../evil.ass from benchmarks CWD = benchmarks/evil.ass -> refused
+    rc = cli.main(
+        [
+            "--root",
+            str(root),
+            "source",
+            "add",
+            "--path",
+            "fixtures/Fx00/reference.wav",
+            "--source-id",
+            "FXEVIL",
+            "--subtitle",
+            "main=sidecar:../evil.ass",
+            "--rights",
+            "private-local",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "REFUSED (private data policy)" in captured.err
+    registry = (root / "cases" / "sources.json").read_text(encoding="utf-8")
+    assert "FXEVIL" not in registry
+    assert not (BENCH_ROOT / "evil.ass").exists()
 
 
 def test_private_path_policy(tmp_path):
