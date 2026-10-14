@@ -10,6 +10,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -134,6 +135,16 @@ def _load_events_with_text(path: Path, fmt: str) -> list[tuple[int, int, str]]:
     ]
 
 
+def _group_note(norm: str, raw_text: str, positions: list[int], cues: list[str]) -> str:
+    return (
+        f"duplicate-text group {raw_text!r} (normalized {norm!r}) at positions "
+        f"{positions} (cues {cues}): identical normalized text makes positional "
+        "identity ambiguous; the assigned output onset order is non-monotone "
+        "(swap evidence) relative to the input file order, so these cues are "
+        "left unmapped (abstained), never guessed"
+    )
+
+
 def _proposal_for_indices(
     case: CaseManifest,
     out_events: list[tuple[int, int, str]],
@@ -146,13 +157,38 @@ def _proposal_for_indices(
 ) -> ProposalRecord:
     """Map tool output back to cue IDs.
 
-    Identity requires BOTH conditions:
+    Identity requires ALL of:
     1. exact event-count equality (positional mapping is only defined then);
     2. cue correspondence by TEXT: at every mapped position, the output
        event's normalized text must equal the input event's normalized text
        (tools may change timings only; reordering, merged/rewritten text, or
        any other rewrite is an ambiguous correspondence, refused — never
-       guessed).
+       guessed);
+    3. multiset equality of normalized texts between input and output: an
+       output that drops one event and duplicates another has rewritten the
+       event set, not only its timings, so it is refused as ambiguous;
+    4. ORDER evidence for duplicate-normalized-text groups. Positional text
+       equality cannot say which identical-text output event belongs to which
+       identical-text cue, so for every group of k>=2 positions sharing one
+       normalized text the group is mapped only when the output START onsets
+       assigned to it are non-decreasing in the group's input (file-event)
+       order. Input events are in file order, so an order-preserving identity
+       maps a monotone input onset sequence to a monotone output onset
+       sequence; any non-identity permutation of distinct onsets contains a
+       descent (a swap of two identical-text cues with meaningfully different
+       times, the realistic corruption). The order evidence presupposes an
+       onset-monotone reference: when a group's own input onsets are NOT
+       non-decreasing (a deliberately unsorted source track, e.g. cues with
+       empty text in an unsorted file), no monotone reference exists and the
+       existing positional text equality is retained instead (no abstention is
+       invented from a broken premise). On failed group evidence ONLY that
+       group's cues are left unmapped (excluded from proposed_times_us, listed
+       in unmapped_cue_ids, with the group text/positions/cue ids noted); the
+       remaining uniquely-identified mappings stand and the status stays
+       1:1-order-preserving. Duplicate-group abstentions are scored as unmapped
+       cues (zero repaired credit), never as accepted mappings. If every cue
+       collapses into a failed group, the whole proposal is refused as
+       ambiguous with zero times, exactly as a text-rewrite refusal.
     """
     if mapping is not None:
         ids = mapping.proxy_index_to_cue
@@ -183,6 +219,25 @@ def _proposal_for_indices(
                 f"vs {len(out_texts)} output texts; refusing to guess correspondence"
             ),
         )
+    in_norms = [normalize_text(tin[2]) for tin in input_events]
+    out_norms = [normalize_text(t) for t in out_texts]
+    if Counter(out_norms) != Counter(in_norms):
+        pos = next(i for i, (a, b) in enumerate(zip(in_norms, out_norms)) if a != b)
+        return ProposalRecord(
+            case_id=case.case_id,
+            candidate_id="",
+            mapping_status="mapping_failure_ambiguous_text",
+            regions=[],
+            proposed_times_us={},
+            unmapped_cue_ids=list(corrupted_times.keys()),
+            notes=(
+                f"tool rewrote the event multiset: normalized-text counts differ; "
+                f"first difference at position {pos} (cue {ids[pos]}): input "
+                f"{input_events[pos][2]!r} vs output {out_texts[pos]!r}; "
+                f"{len(out_events)} outputs vs {len(ids)} inputs; refusing to "
+                "guess correspondence"
+            ),
+        )
     for pos, (cid, tin, tout) in enumerate(zip(ids, input_events, out_texts)):
         if normalize_text(tin[2]) != normalize_text(tout):
             return ProposalRecord(
@@ -199,14 +254,58 @@ def _proposal_for_indices(
                     "guess correspondence"
                 ),
             )
+    groups: dict[str, list[int]] = {}
+    for pos, norm in enumerate(in_norms):
+        groups.setdefault(norm, []).append(pos)
+    failed: list[tuple[str, str, list[int], list[str]]] = []
+    for norm, positions in groups.items():
+        if len(positions) < 2:
+            continue
+        in_starts = [input_events[p][0] for p in positions]
+        if any(in_starts[i] > in_starts[i + 1] for i in range(len(in_starts) - 1)):
+            continue
+        starts = [out_events[p][0] for p in positions]
+        if any(starts[i] > starts[i + 1] for i in range(len(starts) - 1)):
+            failed.append(
+                (
+                    norm,
+                    input_events[positions[0]][2],
+                    positions,
+                    [ids[p] for p in positions],
+                )
+            )
+    excluded = {cid for _norm, _raw, _pos, cues in failed for cid in cues}
     proposed: dict[str, tuple[int, int]] = {}
     deltas: list[tuple[int, int]] = []
     for cue_id, (start_us, end_us, _text) in zip(ids, out_events):
+        if cue_id in excluded:
+            continue
         c_start, _c_end = corrupted_times[cue_id]
         proposed[cue_id] = (start_us, end_us)
         deltas.append((c_start, start_us - c_start))
+    if not proposed:
+        detail = "; ".join(
+            _group_note(norm, raw, positions, cues)
+            for norm, raw, positions, cues in failed
+        )
+        return ProposalRecord(
+            case_id=case.case_id,
+            candidate_id="",
+            mapping_status="mapping_failure_ambiguous_text",
+            regions=[],
+            proposed_times_us={},
+            unmapped_cue_ids=list(corrupted_times.keys()),
+            notes=f"{notes}; {detail}",
+        )
     regions = fit_regions(deltas, case.grid_us, tol_us)
     unmapped = [cid for cid in corrupted_times if cid not in proposed]
+    new_notes = notes
+    if failed:
+        detail = "; ".join(
+            _group_note(norm, raw, positions, cues)
+            for norm, raw, positions, cues in failed
+        )
+        new_notes = f"{notes}; {detail}"
     return ProposalRecord(
         case_id=case.case_id,
         candidate_id="",
@@ -214,7 +313,7 @@ def _proposal_for_indices(
         regions=regions,
         proposed_times_us=proposed,
         unmapped_cue_ids=unmapped,
-        notes=notes,
+        notes=new_notes,
     )
 
 
