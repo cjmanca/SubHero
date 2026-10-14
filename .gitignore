@@ -225,4 +225,9 @@ benchmarks/results/
 benchmarks/local_config.json
 benchmarks/cases/sources.json
 benchmarks/_scratch/
-benchmarks/results/
+
+# Private benchmark data home (real reference episodes E01/E02 and everything derived
+# from them: media, sidecars, audio extracts, transcripts, annotations, private case
+# manifests, logs, model outputs, results). Only the README stub is committed.
+benchmarks/private/*
+!benchmarks/private/README.md

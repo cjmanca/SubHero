@@ -24,6 +24,8 @@ from .subtitles import Track
 from .validator import validate_proposal
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = DEFAULT_ROOT.parent
+SYNTHETIC_RIGHTS = "redistributable-synthetic-fixture"
 
 
 def _paths(root: Path) -> dict[str, Path]:
@@ -31,6 +33,8 @@ def _paths(root: Path) -> dict[str, Path]:
         "root": root,
         "cases": root / "cases",
         "fixtures": root / "fixtures",
+        "private": root / "private",
+        "private_cases": root / "private" / "cases",
         "scratch": root / "_scratch",
         "results": root / "results",
         "sources": root / "cases" / "sources.json",
@@ -58,6 +62,70 @@ def _resolve_under_root(paths: dict[str, Path], raw: str | Path) -> Path:
 
 def _resolve_generated(paths: dict[str, Path], case: CaseManifest) -> Path:
     return _resolve_under_root(paths, case.generated_path)
+
+
+def _under_root(path: Path, root: Path) -> bool:
+    resolved = Path(path).resolve()
+    root = Path(root).resolve()
+    return resolved == root or root in resolved.parents
+
+
+def _private_path_policy(
+    candidate: Path, benchmarks_root: Path, repo_root: Path
+) -> str | None:
+    """Return a refusal reason for in-repo paths outside the private/fixtures homes.
+
+    Paths outside the repository (e.g. read-only mounts) are allowed. Inside the repo,
+    registered media, sidecar subtitles, and gold annotations must live under
+    ``benchmarks/private/`` (real reference episodes) or ``benchmarks/fixtures/``
+    (redistributable synthetic fixtures).
+    """
+    resolved = Path(candidate).resolve()
+    if not _under_root(resolved, repo_root):
+        return None
+    for home in (benchmarks_root / "private", benchmarks_root / "fixtures"):
+        if _under_root(resolved, home):
+            return None
+    return (
+        f"in-repo path {resolved} is outside benchmarks/private/ and benchmarks/fixtures/; "
+        f"register private data under {(benchmarks_root / 'private').resolve()} "
+        "or outside the repository (read-only mounts are allowed)"
+    )
+
+
+def _case_manifest_path(
+    paths: dict[str, Path], case_id: str, rights_status: str
+) -> Path:
+    """Keep non-synthetic case manifests out of the committed cases directory."""
+    if rights_status == SYNTHETIC_RIGHTS:
+        return paths["cases"] / f"{case_id}.case.json"
+    return paths["private_cases"] / f"{case_id}.case.json"
+
+
+def _lookup_case_path(paths: dict[str, Path], case_id: str) -> Path | None:
+    for d in (paths["cases"], paths["private_cases"]):
+        p = d / f"{case_id}.case.json"
+        if p.is_file():
+            return p
+    return None
+
+
+def _iter_case_paths(paths: dict[str, Path]) -> list[Path]:
+    found: dict[str, Path] = {}
+    for d in (paths["cases"], paths["private_cases"]):
+        for p in sorted(d.glob("*.case.json")):
+            found.setdefault(p.name, p)
+    return [found[name] for name in sorted(found)]
+
+
+def _case_id_is_safe(case_id: str) -> bool:
+    return (
+        bool(case_id)
+        and "/" not in case_id
+        and "\\" not in case_id
+        and ".." not in case_id
+        and not case_id.startswith(".")
+    )
 
 
 def _verify_sources(
@@ -99,6 +167,21 @@ def cmd_source_add(args, paths) -> int:
     if not media.exists():
         print(f"NOT FOUND: {media}", file=sys.stderr)
         return 2
+    policy_targets: list[Path] = [media]
+    for spec in args.subtitle or []:
+        _, _, target = spec.partition("=")
+        if target.startswith("sidecar:"):
+            policy_targets.append(
+                _resolve_under_root(paths, target.removeprefix("sidecar:"))
+            )
+    for gold_spec in args.gold or []:
+        _, _, target = gold_spec.partition("=")
+        policy_targets.append(_resolve_under_root(paths, target))
+    for target in policy_targets:
+        reason = _private_path_policy(target, paths["root"], REPO_ROOT)
+        if reason is not None:
+            print(f"REFUSED (private data policy): {reason}", file=sys.stderr)
+            return 2
     sources = _load_sources(paths["sources"])
     if args.source_id in sources["sources"]:
         print(f"source id already registered: {args.source_id}", file=sys.stderr)
@@ -180,6 +263,12 @@ def cmd_case_prepare(args, paths) -> int:
     case_id = (
         args.case_id or f"{args.source_id}-{args.track_id}-{args.scenario}-{args.seed}"
     )
+    if not _case_id_is_safe(case_id):
+        print(
+            f"REFUSED: case id {case_id!r} contains path separators; refusing to route manifest",
+            file=sys.stderr,
+        )
+        return 2
     scratch_case = paths["scratch"] / case_id
     scratch_case.mkdir(parents=True, exist_ok=True)
     if spec.startswith("sidecar:"):
@@ -228,14 +317,14 @@ def cmd_case_prepare(args, paths) -> int:
             case.gold_classification_path = relg.as_posix()
         except ValueError:
             pass
-    case_path = paths["cases"] / f"{case_id}.case.json"
+    case_path = _case_manifest_path(paths, case_id, s.get("rights_status", ""))
     write_json(case_path, case.to_json())
     print(f"prepared case {case_id} -> {out} (manifest {case_path})")
     return 0
 
 
 def cmd_case_list(args, paths) -> int:
-    for p in sorted((paths["cases"]).glob("*.case.json")):
+    for p in _iter_case_paths(paths):
         d = read_json(p)
         print(
             f"{d['case_id']}\t{d['scenario']}\tseed={d['seed']}\tsource={d['source_id']}/{d['track_id']}"
@@ -265,8 +354,8 @@ def cmd_run(args, paths) -> int:
     tools = ToolConfig.detect()
     rc = 0
     for case_id in args.case:
-        case_path = paths["cases"] / f"{case_id}.case.json"
-        if not case_path.exists():
+        case_path = _lookup_case_path(paths, case_id)
+        if case_path is None:
             print(f"case not prepared: {case_id}", file=sys.stderr)
             rc = 2
             continue
@@ -368,7 +457,11 @@ def cmd_score(args, paths) -> int:
         break_match_us=args.tol_break_us,
     )
     for case_id in args.case:
-        case = _load_case(paths["cases"] / f"{case_id}.case.json")
+        case_path = _lookup_case_path(paths, case_id)
+        if case_path is None:
+            print(f"case not prepared: {case_id}", file=sys.stderr)
+            return 2
+        case = _load_case(case_path)
         sources = _load_sources(paths["sources"])
         problems = _verify_sources(paths, case.source_id, sources, case)
         if problems:
@@ -407,7 +500,7 @@ def cmd_score(args, paths) -> int:
 
 def cmd_report(args, paths) -> int:
     case_ids = args.case or sorted(
-        p.name.split(".")[0] for p in paths["cases"].glob("*.case.json")
+        p.name.split(".")[0] for p in _iter_case_paths(paths)
     )
     runs, scores, versions = [], [], {}
     for case_id in case_ids:
@@ -518,7 +611,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     paths = _paths(Path(args.root).resolve())
-    scratch_roots = [paths["scratch"], paths["results"], paths["cases"]]
+    scratch_roots = [
+        paths["scratch"],
+        paths["results"],
+        paths["cases"],
+        paths["private_cases"],
+    ]
     sources = _load_sources(paths["sources"])
     source_roots = [
         Path(s["media_path"]).resolve().parent for s in sources["sources"].values()
@@ -528,7 +626,12 @@ def main(argv: list[str] | None = None) -> int:
 
         add_forbidden_root(Path(extra))
     configure(scratch_roots, source_roots, args.forbidden_root)
-    for p in (paths["cases"], paths["scratch"], paths["results"]):
+    for p in (
+        paths["cases"],
+        paths["private_cases"],
+        paths["scratch"],
+        paths["results"],
+    ):
         p.mkdir(parents=True, exist_ok=True)
     return args.func(args, paths)
 

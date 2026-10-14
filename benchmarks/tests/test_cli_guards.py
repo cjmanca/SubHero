@@ -33,7 +33,7 @@ def test_cli_matrix_fingerprint_verification_blocks_tampered_source(tmp_path, ca
         "--gold",
         f"main={fx / 'gold_episode.json'}",
         "--rights",
-        "synthetic",
+        "redistributable-synthetic-fixture",
     ]
     assert cli.main(argv_add) == 0
     assert (

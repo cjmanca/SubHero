@@ -17,7 +17,7 @@
 
 | Slice | State | Evidence |
 | --- | --- | --- |
-| M1 Private benchmark data protection | **pending** | — |
+| M1 Private benchmark data protection | **accepted** | `.gitignore` ignores `benchmarks/private/*` (only `README.md` stub committed); `benchmarks/private/README.md` documents layout; CLI (`cli.py`) refuses in-repo media/sidecar/gold registration outside `private/`+`fixtures/` before any writes; case manifests routed: committed `cases/` only for `redistributable-synthetic-fixture`, all others → ignored `private/cases/`; `case list`/`run`/`score`/`report` scan both. Orchestrator-verified at acceptance: `pytest benchmarks\tests -q` → **67 passed** (49 baseline + 18 new); `ruff check .` clean; `ruff format --check .` clean; `git check-ignore -v` matched `benchmarks/private/E01/episode.mkv` and `benchmarks/private/cases/E01-S01.case.json` (rule `.gitignore:232`), README not ignored; `git ls-files` → 7 Fx00 manifests + `benchmarks/private/README.md` tracked |
 | M2 Correct source-stream selection | **pending** | — |
 | M3 Correct benchmark scoring | **pending** | — |
 | M4 Remove ground-truth leakage | **pending** | — |

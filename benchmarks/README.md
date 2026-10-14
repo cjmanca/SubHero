@@ -99,6 +99,23 @@ holdout. Copy nothing into the repo: private media, transcripts, identifying pat
 weights and credentials never get committed. `benchmarks/cases/sources.json` (contains
 absolute local paths) and the scratch/results trees are git-ignored.
 
+Private-data home and CLI protection (enforced, not just policy):
+
+- The supported repository-local home for real episodes is **`benchmarks/private/`**
+  (see its README stub). Each episode goes in its own subdirectory, e.g.
+  `benchmarks/private/E01/episode.mkv` with sidecars beside it. Everything under
+  `benchmarks/private/` — media, sidecar subtitles, extracted audio, transcripts,
+  annotations/gold files, private case manifests, logs, model outputs, results — is
+  git-ignored and **never committed**; only `benchmarks/private/README.md` is committed.
+- `source add` **refuses** to register any media, sidecar subtitle, or gold annotation
+  path that resolves inside the repository outside `benchmarks/private/` and the
+  synthetic `benchmarks/fixtures/` home (exit 2, nothing registered, no partial writes).
+  Paths outside the repository (e.g. read-only mounts) are allowed and recommended.
+- Case manifests are routed by rights: only `redistributable-synthetic-fixture` sources
+  write `.case.json` manifests into the committed `benchmarks/cases/` directory; all
+  other sources (e.g. `private-local`) write under `benchmarks/private/cases/`.
+  `case list`, `run`, `score`, and `report` find manifests in both locations.
+
 ## Safety invariants enforced by this harness
 
 - Sources opened read-only; fingerprints recorded at registration; `run` and `score`
@@ -123,7 +140,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 49 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 67 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 
