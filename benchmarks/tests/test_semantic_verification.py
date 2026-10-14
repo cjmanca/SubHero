@@ -119,6 +119,29 @@ def _validate(tmp_path, monkeypatch, cue_text, transcript, verifier, language):
     return acc, proposal, corrupted
 
 
+def _validate2(
+    tmp_path, monkeypatch, cue_text, transcript, verifier, language, subtitle_language
+):
+    monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
+    case, proposal, corrupted = _hand_case(cue_text)
+    asr = _FakeASR({cid: transcript for cid in cue_text})
+    acc = validator.validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run",
+        asr,
+        language,
+        1,
+        verifier=verifier,
+        subtitle_language=subtitle_language,
+    )
+    return acc, proposal, corrupted
+
+
 def _clean_env(monkeypatch):
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
@@ -301,6 +324,157 @@ def test_transliteration_marker_helpers():
         EN_SUB, ROMAJI_MATCH
     )  # language und: residual documented
     assert not is_cross_language(EN_SUB, EN_SUB, "en")
+
+
+# --- F03: broad script classes + language-identity routing ----------------------
+
+KO_TRANSCRIPT = "안녕하세요"  # Hangul
+RU_TRANSCRIPT = "защитник этого города"  # Cyrillic
+FR_TRANSCRIPT = "bonjour"  # Latin script, French identity
+EN_GREET = "Hello"
+EN_DOOR = "the door is open"
+EN_DOOR_ALT = "lamps hum on the table"
+
+
+def test_identity_routing_units():
+    from bench.validator import dominant_script, is_cross_language, normalize_language
+
+    # Broad scripts become dominant (Hangul, Cyrillic) and contrast Latin.
+    assert dominant_script(KO_TRANSCRIPT) == "Hangul"
+    assert dominant_script(RU_TRANSCRIPT) == "Cyrillic"
+    assert dominant_script(EN_SUB) == "Latin"
+    # Script contrast routes ko/ru as cross-language with NO language hints.
+    assert is_cross_language(EN_SUB, KO_TRANSCRIPT)
+    assert is_cross_language(EN_SUB, RU_TRANSCRIPT)
+    # Identity is authoritative when both are known: same -> lexical, diff -> cross.
+    assert is_cross_language(EN_SUB, EN_GREET, "fr", "en")  # fr/en differ
+    assert not is_cross_language(EN_SUB, EN_GREET, "en", "en")
+    assert not is_cross_language(EN_DOOR, EN_DOOR_ALT, "eng", "en")  # eng==en
+    # Both-und French->English: no script contrast (both Latin), residual path.
+    assert not is_cross_language(EN_GREET, FR_TRANSCRIPT, "und", "und")
+    # ffprobe 3-letter vs CLI 2-letter normalize equal; "und" is unknown.
+    assert normalize_language("zh-Hans") == "zh"
+    assert normalize_language("kor") == normalize_language("ko")
+    assert normalize_language("und") is None
+
+
+@pytest.mark.parametrize(
+    ("transcript", "audio_hint", "subtitle_hint"),
+    [(KO_TRANSCRIPT, "ko", "en"), (RU_TRANSCRIPT, "ru", "en")],
+)
+def test_korean_russian_routes_by_identity_not_lexical(
+    tmp_path, monkeypatch, transcript, audio_hint, subtitle_hint
+):
+    cue_text = {cid: EN_SUB for cid in ("e0000", "e0001", "e0002")}
+    # Verifier match -> accept (lexical ~0, so only the verifier can accept).
+    acc, proposal, _corrupted = _validate2(
+        tmp_path,
+        monkeypatch,
+        cue_text,
+        transcript,
+        MockSemanticVerifier({EN_SUB: "match"}),
+        audio_hint,
+        subtitle_hint,
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.accepted_times_us == proposal.proposed_times_us
+    # Verifier no_match -> reject.
+    acc2, _p2, corrupted2 = _validate2(
+        tmp_path,
+        monkeypatch,
+        cue_text,
+        transcript,
+        MockSemanticVerifier({EN_SUB: "no_match"}),
+        audio_hint,
+        subtitle_hint,
+    )
+    assert len(acc2.rejected_regions) == 1
+    assert acc2.accepted_times_us == corrupted2
+    # No verifier -> abstain, NOT reject (the old lexical rule false-rejected).
+    acc3, _p3, corrupted3 = _validate2(
+        tmp_path, monkeypatch, cue_text, transcript, None, audio_hint, subtitle_hint
+    )
+    assert acc3.status == "not_run"
+    assert acc3.rejected_regions == []
+    assert acc3.accepted_times_us == corrupted3
+
+
+def test_french_english_same_script_never_lexically_rejected(tmp_path, monkeypatch):
+    # Both Latin script: script detection sees no contrast, so only verified
+    # language identity routes this as cross-language. Low ratio must NOT reject.
+    cue_text = {cid: EN_GREET for cid in ("e0000", "e0001", "e0002")}
+    lexical = validator.semantic_match(EN_GREET, FR_TRANSCRIPT)
+    assert lexical < validator.MIN_MATCH_RATIO  # old rule would have false-rejected
+    # Identity hints fr/en -> cross -> verifier match accepts.
+    acc, _proposal, _corrupted = _validate2(
+        tmp_path,
+        monkeypatch,
+        cue_text,
+        FR_TRANSCRIPT,
+        MockSemanticVerifier({EN_GREET: "match"}),
+        "fr",
+        "en",
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.rejected_regions == []
+    # Identity hints fr/en, no verifier -> abstain (not reject).
+    acc2, _p2, corrupted2 = _validate2(
+        tmp_path, monkeypatch, cue_text, FR_TRANSCRIPT, None, "fr", "en"
+    )
+    assert acc2.status == "not_run"
+    assert acc2.rejected_regions == []
+    assert acc2.accepted_times_us == corrupted2
+
+
+def test_unverified_identity_low_overlap_never_rejects(tmp_path, monkeypatch):
+    # Regression guard extended to ko/ru/fr with hints left "und": a translated
+    # proposal must NEVER be lexically rejected on low overlap when the identity
+    # pair is not verified — zero rejected regions in the no-verifier cross run.
+    rejected_total = 0
+    for transcript in (KO_TRANSCRIPT, RU_TRANSCRIPT, FR_TRANSCRIPT):
+        cue_text = {cid: EN_SUB for cid in ("e0000", "e0001", "e0002")}
+        acc, _proposal, corrupted = _validate2(
+            tmp_path, monkeypatch, cue_text, transcript, None, "und", "und"
+        )
+        assert acc.rejected_regions == []
+        assert acc.accepted_times_us == corrupted
+        rejected_total += len(acc.rejected_regions)
+    assert rejected_total == 0
+
+
+def test_verified_same_language_match_accepts(tmp_path, monkeypatch):
+    cue_text = {cid: EN_DOOR for cid in ("e0000", "e0001", "e0002")}
+    acc, proposal, _corrupted = _validate2(
+        tmp_path, monkeypatch, cue_text, EN_DOOR, None, "en", "en"
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.accepted_times_us == proposal.proposed_times_us
+
+
+def test_verified_same_language_contradiction_rejects(tmp_path, monkeypatch):
+    # Reject remains reachable ONLY for a verified same-language pair (both en).
+    cue_text = {cid: EN_DOOR for cid in ("e0000", "e0001", "e0002")}
+    acc, _proposal, corrupted = _validate2(
+        tmp_path, monkeypatch, cue_text, EN_DOOR_ALT, None, "en", "en"
+    )
+    assert acc.status == "success"
+    assert len(acc.rejected_regions) == 1
+    assert acc.accepted_times_us == corrupted
+
+
+def test_verifier_receives_resolved_language_hints(tmp_path, monkeypatch):
+    # The verifier must get the real resolved identities, never a hardcoded "und".
+    cue_text = {cid: EN_SUB for cid in ("e0000", "e0001", "e0002")}
+    verifier = MockSemanticVerifier({EN_SUB: "match"})
+    _validate2(tmp_path, monkeypatch, cue_text, KO_TRANSCRIPT, verifier, "ko", "en")
+    assert verifier.calls
+    for _subtitle_text, subtitle_hint, audio_hint in verifier.calls:
+        assert subtitle_hint == "en"
+        assert audio_hint == "ko"
+        assert subtitle_hint != "und"
 
 
 # --- HTTP layer: mocked transport only -------------------------------------------

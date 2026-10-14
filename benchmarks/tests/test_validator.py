@@ -199,6 +199,7 @@ def test_same_language_lexical_reject_preserved(tmp_path, monkeypatch):
         "en",
         1,
         verifier=None,
+        subtitle_language="en",
     )
     assert acc.status == "success"
     assert len(acc.rejected_regions) == 1

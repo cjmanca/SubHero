@@ -7,12 +7,23 @@ timestamp is insufficient. When evidence is insufficient the region is
 rejected/abstained and original timing is retained. Ground-truth
 correspondence labels are never fed to the validator.
 
-Cross-language verdicts (P1 fix): a Japanese/Chinese audio transcript against
-an ENGLISH subtitle is a translation, so lexical overlap is ~0 — lexical
-comparison is NEITHER accept-support NOR reject evidence across languages.
-Same-script pairs keep the lexical Dice decision; cross-script pairs are
-decided only by an explicitly configured semantic verifier
-(`BENCH_SEM_VERIFY_*`, translation-tolerant), and abstain without one.
+Cross-language verdicts (P1 fix F03): a translated proposal (Korean/Russian/
+French/Japanese/Chinese audio transcript against an ENGLISH subtitle) has ~0
+lexical overlap, so lexical comparison is NEITHER accept-support NOR reject
+evidence across languages. Routing is by verified source/target LANGUAGE
+identity, with script detection only as a fallback signal:
+
+* both spoken and subtitle identities known and EQUAL -> the lexical Dice
+  decision stands (accept, and genuine CONTRADICTION reject);
+* known and DIFFERENT -> cross-language: only an explicitly configured semantic
+  verifier (`BENCH_SEM_VERIFY_*`, translation-tolerant) decides, never lexical;
+* identity unknown/mixed -> low overlap is NOT sufficient negative evidence:
+  route to the verifier when configured, otherwise abstain (never reject);
+  positive lexical support with confidence is still valid.
+
+Script profiling covers Hangul, Cyrillic, Greek, Arabic and Devanagari in
+addition to kana/ideographs/Latin; a dominant-script contrast is one signal
+among language identity, never the sole cross-language gate.
 """
 
 from __future__ import annotations
@@ -28,17 +39,95 @@ from .media import extract_audio_window
 PAD_US = 1_500_000
 MIN_MATCH_RATIO = 0.45
 MIN_CONFIDENCE = -0.5
+SCRIPT_MAJORITY = 0.5
+# Script classes used for dominant-script detection. Lexical comparison is
+# meaningful evidence only when both sides share the same language; a majority-
+# script contrast is a *signal* that lexical comparison is meaningless, never
+# the sole cross-language gate (language identity is authoritative when both
+# identities are known — see is_cross_language / validate_proposal).
+SCRIPT_RANGES: dict[str, re.Pattern[str]] = {
+    "Kana": re.compile(r"[\u3040-\u30ff]"),
+    "Han": re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]"),
+    "Hangul": re.compile(r"[\u1100-\u11ff\u3130-\u318e\uac00-\ud7a3]"),
+    "Cyrillic": re.compile(r"[\u0400-\u04ff\u0500-\u052f]"),
+    "Greek": re.compile(r"[\u0370-\u03ff]"),
+    "Latin": re.compile(r"[A-Za-z]"),
+    "Arabic": re.compile(r"[\u0600-\u06ff\u0750-\u077f]"),
+    "Devanagari": re.compile(r"[\u0900-\u097f]"),
+}
 CJK_RANGE_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 LATIN_RANGE_RE = re.compile(r"[A-Za-z]")
-SCRIPT_MAJORITY = 0.5
 # Transliterated ASR output (romaji/pinyin) is all-Latin: script detection
 # alone cannot see the translation relationship. When the ASR LANGUAGE is a
-# CJK target (primary subtag starts with ja/zh: ja, jpn, zh, zh-CHS, zh-Hans,
-# zh-Hant, ...) and the subtitle is majority-Latin, the pair is treated as
-# cross-language (verifier boundary) regardless of transcript surface script.
-# Limitation: a transliterated transcript with language "und"/"en" stays on
-# the same-script lexical path (documented residual).
+# CJK target (normalized subtag ja/zh: ja, jpn, zh, zh-CHS, zh-Hans, ...) and
+# the subtitle is majority-Latin, the pair is treated as cross-language
+# (verifier boundary) regardless of transcript surface script. Limitation: a
+# transliterated transcript with language "und"/"en" stays on the same-script
+# lexical path (documented residual — low overlap abstains, never rejects).
 CJK_LANGUAGE_SUBTAGS = ("ja", "zh")
+UNKNOWN_LANGUAGE_TAGS = ("", "und", "zbl", "mul", "mis")
+# ffprobe reports ISO 639-2/B three-letter tags (eng, jpn, kor, rus, fre/fra)
+# while the CLI --language hint uses BCP-47 two-letter forms (en, ja, ko, ru,
+# fr). Normalize the primary subtag so the two conventions compare equal.
+ISO3_TO_ISO1 = {
+    "eng": "en",
+    "jpn": "ja",
+    "zho": "zh",
+    "chi": "zh",
+    "kor": "ko",
+    "rus": "ru",
+    "fre": "fr",
+    "fra": "fr",
+    "deu": "de",
+    "ger": "de",
+    "spa": "es",
+    "ita": "it",
+    "por": "pt",
+    "nld": "nl",
+    "dut": "nl",
+    "pol": "pl",
+    "tur": "tr",
+    "heb": "he",
+    "ara": "ar",
+    "hin": "hi",
+    "tha": "th",
+    "vie": "vi",
+    "ukr": "uk",
+    "ell": "el",
+    "gre": "el",
+    "ces": "cs",
+    "cze": "cs",
+    "hun": "hu",
+    "fin": "fi",
+    "nob": "nb",
+    "nor": "no",
+    "dan": "da",
+    "swe": "sv",
+    "ron": "ro",
+    "rum": "ro",
+    "bul": "bg",
+    "srp": "sr",
+    "hrv": "hr",
+    "slk": "sk",
+    "slv": "sl",
+    "lit": "lt",
+    "lav": "lv",
+    "est": "et",
+    "cat": "ca",
+    "ind": "id",
+    "msa": "ms",
+    "may": "ms",
+    "fas": "fa",
+    "per": "fa",
+    "urd": "ur",
+    "ben": "bn",
+    "tam": "ta",
+    "tel": "te",
+    "mar": "mr",
+    "guj": "gu",
+    "kan": "kn",
+    "mal": "ml",
+}
 
 
 def normalize_text(text: str) -> str:
@@ -57,41 +146,81 @@ def _dice(a: set, b: set) -> float:
     return 2 * len(a & b) / (len(a) + len(b))
 
 
-def script_profile(text: str) -> tuple[float, float]:
-    """(CJK kana/ideograph ratio, Latin ratio) over alphabetic characters."""
+def normalize_language(code: str | None) -> str | None:
+    """Canonical primary language subtag, or None when undetermined.
+
+    Lowercases, drops region/script subtags (``zh-Hans`` -> ``zh``), and maps
+    the three-letter ISO 639-2/B tags ffprobe reports to their ISO 639-1 form
+    (``eng``->``en``, ``kor``->``ko``) so CLI hints and registry tags compare
+    equal. ``und``/empty and the multilingual sentinels are None (unknown)."""
+    if not code:
+        return None
+    primary = code.strip().lower().split("-")[0]
+    if primary in UNKNOWN_LANGUAGE_TAGS:
+        return None
+    return ISO3_TO_ISO1.get(primary, primary)
+
+
+def script_profile(text: str) -> dict[str, float]:
+    """Ratio of each SCRIPT_RANGES class over the letters in ``text``.
+
+    Only letters matched by a SCRIPT_RANGES class are counted; the ratios sum
+    to 1.0 over that recognized-letter set. Empty when there is no such letter.
+    """
     normalized = normalize_text(text)
     letters = [ch for ch in normalized if ch.isalpha()]
     if not letters:
-        return (0.0, 0.0)
-    cjk = sum(1 for ch in letters if CJK_RANGE_RE.match(ch))
-    latin = sum(1 for ch in letters if LATIN_RANGE_RE.match(ch))
-    return (cjk / len(letters), latin / len(letters))
+        return {}
+    counts = {name: 0 for name in SCRIPT_RANGES}
+    for ch in letters:
+        for name, rng in SCRIPT_RANGES.items():
+            if rng.match(ch):
+                counts[name] += 1
+                break
+    total = sum(counts.values())
+    if total == 0:
+        return {}
+    return {name: count / total for name, count in counts.items() if count}
+
+
+def dominant_script(text: str) -> str | None:
+    """Script class holding a strict majority of the text's letters, else None."""
+    ratios = script_profile(text)
+    if not ratios:
+        return None
+    name, ratio = max(ratios.items(), key=lambda kv: kv[1])
+    return name if ratio >= SCRIPT_MAJORITY else None
 
 
 def _transcript_language_is_cjk(language: str | None) -> bool:
-    primary = (language or "").strip().lower().split("-")[0]
-    return primary.startswith(CJK_LANGUAGE_SUBTAGS)
+    return normalize_language(language) in CJK_LANGUAGE_SUBTAGS
 
 
 def is_cross_language(
-    subtitle_text: str, transcript_text: str, language: str | None = None
+    subtitle_text: str,
+    transcript_text: str,
+    language: str | None = None,
+    subtitle_language: str | None = None,
 ) -> bool:
     """True when lexical comparison is meaningless as agreement evidence.
 
-    (1) Script rule: one side majority-Latin and the other majority-CJK
-    (ratio over alphabetic characters exceeding SCRIPT_MAJORITY); or
-    (2) translation-context rule: the ASR `language` names a CJK target
-    (ja*/zh*) while the subtitle is majority-Latin — covering transliterated
-    (romaji/pinyin) transcripts. With language=None/und, only rule (1)
-    applies.
+    Language identity is authoritative when BOTH the spoken (``language``) and
+    target subtitle (``subtitle_language``) identities are known: the pair is
+    cross-language exactly when the two identities differ. When an identity is
+    unknown, fallback signals decide: (1) a dominant-script contrast over the
+    broad script classes, and (2) the transliteration rule (a CJK-language ASR
+    transcript against a majority-Latin subtitle, covering romaji/pinyin). A
+    script contrast is one signal among identity, never the sole gate.
     """
-    s_cjk, s_latin = script_profile(subtitle_text)
-    t_cjk, t_latin = script_profile(transcript_text)
-    if (s_latin > SCRIPT_MAJORITY and t_cjk > SCRIPT_MAJORITY) or (
-        s_cjk > SCRIPT_MAJORITY and t_latin > SCRIPT_MAJORITY
-    ):
+    audio = normalize_language(language)
+    subtitle = normalize_language(subtitle_language)
+    if audio is not None and subtitle is not None:
+        return audio != subtitle
+    s_script = dominant_script(subtitle_text)
+    t_script = dominant_script(transcript_text)
+    if s_script is not None and t_script is not None and s_script != t_script:
         return True
-    return _transcript_language_is_cjk(language) and s_latin > SCRIPT_MAJORITY
+    return _transcript_language_is_cjk(language) and s_script == "Latin"
 
 
 def semantic_match(subtitle_text: str, transcript_text: str) -> float:
@@ -175,6 +304,7 @@ def validate_proposal(
     language: str,
     seed: int,
     verifier=None,
+    subtitle_language: str = "und",
 ) -> AcceptanceRecord:
     """Validate a base arm's proposals with targeted ASR windows.
 
@@ -186,6 +316,15 @@ def validate_proposal(
     ``verifier`` is an optional semantic verifier (translation-tolerant) used
     ONLY for cross-language samples; transcription and verification are
     independently configured boundaries.
+
+    ``language`` is the resolved spoken/audio language hint and
+    ``subtitle_language`` the resolved target-subtitle hint (defaults to "und"
+    so existing call sites keep working). Routing keys on the verified identity
+    pair: equal identities keep the lexical accept/contradiction-reject
+    decision, differing identities are decided only by the verifier, and an
+    unknown identity never rejects on low overlap (it routes to the verifier
+    when configured, otherwise abstains). The verifier always receives the
+    real resolved hints, never a hardcoded "und".
     """
     if transcriber is None:
         return AcceptanceRecord(
@@ -228,7 +367,48 @@ def validate_proposal(
     verdicts: dict[int, list[str]] = {}
     no_verifier_cross_lang = 0
     verifier_no_verdict = 0
+    identity_unknown_abstentions = 0
     mock_verifier_used = False
+    audio_identity = normalize_language(language)
+    subtitle_identity = normalize_language(subtitle_language)
+    same_identity = (
+        audio_identity is not None
+        and subtitle_identity is not None
+        and audio_identity == subtitle_identity
+    )
+
+    def run_verifier(region: int, subtitle_text: str, transcript_text: str) -> None:
+        """Send one sample to the semantic verifier boundary and record its verdict.
+
+        The verifier is translation-tolerant and receives the RESOLVED language
+        hints (never a hardcoded "und"). match -> accept, no_match -> reject,
+        unknown/exception -> abstain (no usable verdict)."""
+        nonlocal asr_seconds, verifier_no_verdict, mock_verifier_used
+        try:
+            sv = verifier.verdict(
+                subtitle_text, transcript_text, subtitle_language, language
+            )
+            asr_seconds += sv.seconds
+        except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
+            verdicts.setdefault(region, []).append("abstain")
+            verifier_no_verdict += 1
+            (scratch_dir / "asr_errors.log").open("a", encoding="utf-8").write(
+                f"{cid}: semantic verifier: {exc}\n"
+            )
+            return
+        if sv.mock:
+            mock_verifier_used = True
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: mock semantic verifier used; test-only\n"
+            )
+        if sv.verdict == "match":
+            verdicts.setdefault(region, []).append("accept")
+        elif sv.verdict == "no_match":
+            verdicts.setdefault(region, []).append("reject")
+        else:
+            verdicts.setdefault(region, []).append("abstain")
+            verifier_no_verdict += 1
+
     for cid in samples:
         start_us, end_us = proposal.proposed_times_us[cid]
         region = cue_region(corrupted_times[cid][0], proposal.regions)
@@ -260,40 +440,36 @@ def validate_proposal(
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                 f"{cid}: mock transcriber used; verdict forced to abstain\n"
             )
-        elif is_cross_language(subtitle_text, result.text, language):
+        elif is_cross_language(subtitle_text, result.text, language, subtitle_language):
             # Lexical score is never accept-support and never reject evidence
             # across languages; only the semantic verifier boundary decides.
             if verifier is None:
                 verdicts.setdefault(region, []).append("abstain")
                 no_verifier_cross_lang += 1
                 continue
-            try:
-                sv = verifier.verdict(subtitle_text, result.text, "und", language)
-                asr_seconds += sv.seconds
-            except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
-                verdicts.setdefault(region, []).append("abstain")
-                verifier_no_verdict += 1
-                (scratch_dir / "asr_errors.log").open("a", encoding="utf-8").write(
-                    f"{cid}: semantic verifier: {exc}\n"
-                )
-                continue
-            if sv.mock:
-                mock_verifier_used = True
-                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
-                    f"{cid}: mock semantic verifier used; test-only\n"
-                )
-            if sv.verdict == "match":
+            run_verifier(region, subtitle_text, result.text)
+        elif same_identity:
+            # Verified same-language pair: lexical agreement is accept-support
+            # and lexical disagreement is genuine CONTRADICTION evidence.
+            if ratio >= MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
                 verdicts.setdefault(region, []).append("accept")
-            elif sv.verdict == "no_match":
+            elif ratio < MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
                 verdicts.setdefault(region, []).append("reject")
             else:
                 verdicts.setdefault(region, []).append("abstain")
-                verifier_no_verdict += 1
         elif ratio >= MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+            # Identity not fully verified and scripts do not contrast: positive
+            # lexical support with confidence is still valid accept evidence.
             verdicts.setdefault(region, []).append("accept")
         elif ratio < MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
-            # Same-script pair: lexical disagreement IS meaningful evidence.
-            verdicts.setdefault(region, []).append("reject")
+            # Identity not verified: low overlap is NOT sufficient negative
+            # evidence. Route to the verifier when configured, else abstain
+            # (never reject on an unverified identity).
+            if verifier is not None:
+                run_verifier(region, subtitle_text, result.text)
+            else:
+                verdicts.setdefault(region, []).append("abstain")
+                identity_unknown_abstentions += 1
         else:
             verdicts.setdefault(region, []).append("abstain")
 
@@ -344,9 +520,18 @@ def validate_proposal(
             f"{verifier_no_verdict} cross-language samples: semantic verifier gave "
             "no usable verdict (unknown/failure); abstained"
         )
+    if identity_unknown_abstentions:
+        notes_parts.append(
+            f"{identity_unknown_abstentions} samples: spoken/subtitle language "
+            "identity not verified; low lexical overlap is not reject evidence "
+            "(configure --language/--subtitle-language plus a semantic verifier "
+            "to decide); abstained"
+        )
     if mock_verifier_used:
         notes_parts.append("mock semantic verifier used (test-only)")
-    no_evidence = (no_verifier_cross_lang + verifier_no_verdict) > 0
+    no_evidence = (
+        no_verifier_cross_lang + verifier_no_verdict + identity_unknown_abstentions
+    ) > 0
     if (
         not accepted_regions
         and not rejected_regions

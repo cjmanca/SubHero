@@ -164,11 +164,16 @@ VERIFIER_SYSTEM_PROMPT = (
 
 
 class MockSemanticVerifier:
-    """Test double returning canned verdicts keyed by subtitle text. Test-only; the CLI never wires it."""
+    """Test double returning canned verdicts keyed by subtitle text. Test-only; the CLI never wires it.
+
+    Records the language hints it receives so tests can assert the validator
+    passes the resolved subtitle/audio identities (never a hardcoded "und").
+    """
 
     def __init__(self, answers: dict[str, str], model: str = "mock-verifier"):
         self.answers = dict(answers)
         self.model = model
+        self.calls: list[tuple[str, str, str]] = []
 
     def verdict(
         self,
@@ -178,6 +183,9 @@ class MockSemanticVerifier:
         transcript_language_hint: str,
     ) -> SemanticVerdict:
         started = time.monotonic()
+        self.calls.append(
+            (subtitle_text, subtitle_language_hint, transcript_language_hint)
+        )
         return SemanticVerdict(
             verdict=self.answers.get(subtitle_text, "unknown"),
             seconds=time.monotonic() - started,

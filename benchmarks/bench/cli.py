@@ -27,7 +27,7 @@ from .paths import add_source_root, configure, require_safe_id
 from .reporting import build_report, write_report
 from .scoring import Tolerances, score_case
 from .subtitles import Track
-from .validator import validate_proposal
+from .validator import normalize_language, validate_proposal
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = DEFAULT_ROOT.parent
@@ -374,6 +374,32 @@ def cmd_source_add(args, paths) -> int:
         else:
             print(f"unsupported subtitle spec {target}", file=sys.stderr)
             return 2
+    subtitle_languages: dict[str, str] = {}
+    for spec in args.subtitle_language or []:
+        track_id, sep, code = spec.partition("=")
+        if not sep or not code.strip():
+            print(
+                f"REFUSED: --subtitle-language spec {spec!r} must be track_id=<lang>",
+                file=sys.stderr,
+            )
+            return 2
+        refused = _refuse_unsafe_id(track_id, "track id")
+        if refused is not None:
+            return refused
+        subtitle_languages[track_id] = code.strip()
+    # MKV subtitle tracks carry an embedded ffprobe language tag; capture it so
+    # the run consumes a verified target identity. Sidecar tracks have no
+    # embedded tag, so they rely on the explicit --subtitle-language hint above.
+    for track_id, sel in subtitle_selected.items():
+        if track_id not in subtitle_languages and sel.get("language"):
+            subtitle_languages[track_id] = sel["language"]
+    # A prepared case records a sidecar track by its file stem (corrupt.py sets
+    # track_id = source_track_path.stem), so alias each sidecar hint by stem too
+    # for the run to look the identity up by the case's persisted track_id.
+    for track_id, target in subtitles.items():
+        if target.startswith("sidecar:") and track_id in subtitle_languages:
+            stem = Path(target.removeprefix("sidecar:")).stem
+            subtitle_languages.setdefault(stem, subtitle_languages[track_id])
     duration = None
     fmt = streams.get("format", {})
     if fmt.get("duration"):
@@ -397,6 +423,7 @@ def cmd_source_add(args, paths) -> int:
         "audio_selected": audio_selected,
         "audio_spec": audio_spec,
         "subtitle_selected": subtitle_selected,
+        "subtitle_languages": subtitle_languages,
         "gold_classification": dict(g.split("=", 1) for g in args.gold)
         if args.gold
         else {},
@@ -704,6 +731,23 @@ def cmd_run(args, paths) -> int:
             # only production getters are wired here, never test mocks.
             transcriber = get_transcriber()
             verifier = get_semantic_verifier()
+            # Resolve the two identities the validator routes on: the spoken
+            # audio language (CLI hint, falling back to the persisted
+            # audio_selected ffprobe tag) and the target subtitle language (CLI
+            # hint, falling back to the registry-captured per-track language).
+            source = sources["sources"][case.source_id]
+            audio_hint = args.language
+            if normalize_language(audio_hint) is None:
+                persisted_audio = (source.get("audio_selected") or {}).get("language")
+                if persisted_audio:
+                    audio_hint = persisted_audio
+            subtitle_hint = args.subtitle_language
+            if normalize_language(subtitle_hint) is None:
+                persisted_subtitle = (source.get("subtitle_languages") or {}).get(
+                    case.track_id
+                )
+                if persisted_subtitle:
+                    subtitle_hint = persisted_subtitle
             acc = validate_proposal(
                 case,
                 base_proposal,
@@ -713,9 +757,10 @@ def cmd_run(args, paths) -> int:
                 ref_wav,
                 paths["results"] / case_id / "b1-va",
                 transcriber,
-                args.language,
+                audio_hint,
                 args.seed,
                 verifier=verifier,
+                subtitle_language=subtitle_hint,
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())
@@ -855,6 +900,14 @@ def build_parser() -> argparse.ArgumentParser:
         "lang = exact unique ffprobe language tag; normalized to mkv:sidx:<n> at registration)",
     )
     pa.add_argument(
+        "--subtitle-language",
+        action="append",
+        default=[],
+        help="track_id=<lang> target subtitle language hint recorded for the run's "
+        "identity routing (MKV subtitle tracks auto-capture their ffprobe language "
+        "tag; sidecar tracks have no embedded tag, so declare the hint here)",
+    )
+    pa.add_argument(
         "--audio",
         help="audio stream spec: index:<n> (ffprobe global index), sidx:<n> "
         "(ffmpeg 0:a:n map index), or lang:<code> (exact unique ffprobe language "
@@ -901,6 +954,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true")
     p.add_argument("--base-candidate", default="b1-px-fg")
     p.add_argument("--language", default="und")
+    p.add_argument(
+        "--subtitle-language",
+        default="und",
+        help="target subtitle language hint for the run's identity routing; when it "
+        "is 'und' the registry-captured per-track language (MKV ffprobe tag / "
+        "sidecar --subtitle-language hint) is used. A verified same-language pair "
+        "is required for lexical reject evidence",
+    )
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--tol-good-us", type=int, default=50_000)
     p.set_defaults(func=cmd_run)

@@ -814,3 +814,190 @@ def test_reference_audio_reextracts_after_selection_change(tmp_path):
     assert meta["media_sha256"] == sha256_file(media)
     assert sha256_file(ref_wav) == jpn_sha
     assert sha256_file(ref_wav) != eng_sha
+
+
+# --- F03: per-track subtitle language identity (registration + run consumption) --
+
+
+def test_subtitle_language_tags_recorded_at_registration(tmp_path):
+    media = _build_mkv(tmp_path)  # subtitle s0=jpn, s1=eng
+    root = tmp_path / "benchroot"
+    rc = _cli_add(
+        root,
+        media,
+        [
+            "--audio",
+            "lang:eng",
+            "--subtitle",
+            "engsub=mkv:lang:eng",
+            "--subtitle",
+            "jpnsub=mkv:lang:jpn",
+        ],
+    )
+    assert rc == 0
+    rec = _record(root, "MS")
+    assert rec["subtitle_languages"]["engsub"] == "eng"
+    assert rec["subtitle_languages"]["jpnsub"] == "jpn"
+
+
+def test_sidecar_subtitle_language_hint_recorded(tmp_path, fixture_dir):
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    sidecar = tmp_path / "episode.ass"
+    shutil.copy2(fixture_dir / "episode.ass", sidecar)
+    rc = _cli_add(
+        root,
+        media,
+        [
+            "--audio",
+            "lang:eng",
+            "--subtitle",
+            f"main=sidecar:{sidecar}",
+            "--subtitle-language",
+            "main=kor",
+        ],
+    )
+    assert rc == 0
+    rec = _record(root, "MS")
+    assert rec["subtitle_languages"]["main"] == "kor"
+    # A prepared sidecar case records track_id = file stem, so the hint is also
+    # aliased by stem for the run to resolve the target identity.
+    assert rec["subtitle_languages"]["episode"] == "kor"
+
+
+def test_bad_subtitle_language_spec_refused(tmp_path, capsys):
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    rc = _cli_add(
+        root,
+        media,
+        ["--audio", "lang:eng", "--subtitle-language", "engsub"],
+        source_id="BADLANG",
+    )
+    assert rc == 2
+    assert "--subtitle-language" in capsys.readouterr().err
+    assert not (root / "cases" / "sources.json").exists()
+
+
+def _prepare_and_run_base(root, source_id, track_id, case_id):
+    assert (
+        cli.main(
+            [
+                "--root",
+                str(root),
+                "case",
+                "prepare",
+                "--source-id",
+                source_id,
+                "--track-id",
+                track_id,
+                "--scenario",
+                "S00",
+                "--seed",
+                "1",
+                "--case-id",
+                case_id,
+            ]
+        )
+        == 0
+    )
+    base = [
+        "--root",
+        str(root),
+        "run",
+        "--case",
+        case_id,
+        "--candidate",
+        "b1-n",
+        "--base-candidate",
+        "b1-n",
+    ]
+    assert cli.main(base) == 0
+    return base
+
+
+def _capture_validate(monkeypatch):
+    from bench.manifests import AcceptanceRecord
+
+    captured: dict = {}
+
+    def _fake_validate(*args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        return AcceptanceRecord(
+            case_id=args[0].case_id,
+            candidate_id="b1-va",
+            validated_candidate_id=args[2],
+            status="not_run",
+            accepted_regions=[],
+            rejected_regions=[],
+            abstained_regions=[],
+            accepted_times_us=dict(args[3]),
+            sample_cue_ids=[],
+            asr_seconds=0.0,
+            asr_calls=0,
+        )
+
+    monkeypatch.setattr(cli, "validate_proposal", _fake_validate)
+    return captured
+
+
+def test_cmd_run_consumes_registry_subtitle_language(tmp_path, monkeypatch):
+    # Spoken identity from the persisted audio ffprobe tag (CLI --language left
+    # "und"); target subtitle identity from the registry-captured MKV tag; both
+    # threaded to validate_proposal.
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    assert (
+        _cli_add(
+            root, media, ["--audio", "lang:eng", "--subtitle", "engsub=mkv:lang:eng"]
+        )
+        == 0
+    )
+    base = _prepare_and_run_base(root, "MS", "engsub", "LANGMKV")
+    captured = _capture_validate(monkeypatch)
+    assert cli.main([*base, "--candidate", "b1-va"]) == 0
+    assert captured["args"][8] == "eng"  # resolved spoken/audio hint
+    assert captured["subtitle_language"] == "eng"  # resolved target subtitle hint
+
+
+def test_cmd_run_consumes_sidecar_subtitle_language(tmp_path, monkeypatch, fixture_dir):
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    sidecar = tmp_path / "episode.ass"
+    shutil.copy2(fixture_dir / "episode.ass", sidecar)
+    assert (
+        _cli_add(
+            root,
+            media,
+            [
+                "--audio",
+                "lang:eng",
+                "--subtitle",
+                f"main=sidecar:{sidecar}",
+                "--subtitle-language",
+                "main=kor",
+            ],
+        )
+        == 0
+    )
+    base = _prepare_and_run_base(root, "MS", "main", "LANGSIDE")
+    captured = _capture_validate(monkeypatch)
+    assert cli.main([*base, "--candidate", "b1-va"]) == 0
+    assert captured["args"][8] == "eng"  # persisted audio identity
+    assert captured["subtitle_language"] == "kor"  # recorded sidecar hint
+
+
+def test_cmd_run_subtitle_language_flag_overrides_registry(tmp_path, monkeypatch):
+    media = _build_mkv(tmp_path)
+    root = tmp_path / "benchroot"
+    assert (
+        _cli_add(
+            root, media, ["--audio", "lang:eng", "--subtitle", "engsub=mkv:lang:eng"]
+        )
+        == 0
+    )
+    base = _prepare_and_run_base(root, "MS", "engsub", "LANGOVR")
+    captured = _capture_validate(monkeypatch)
+    assert cli.main([*base, "--candidate", "b1-va", "--subtitle-language", "fra"]) == 0
+    assert captured["subtitle_language"] == "fra"  # run flag wins over registry
