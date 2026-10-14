@@ -31,6 +31,14 @@ MIN_CONFIDENCE = -0.5
 CJK_RANGE_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 LATIN_RANGE_RE = re.compile(r"[A-Za-z]")
 SCRIPT_MAJORITY = 0.5
+# Transliterated ASR output (romaji/pinyin) is all-Latin: script detection
+# alone cannot see the translation relationship. When the ASR LANGUAGE is a
+# CJK target (primary subtag starts with ja/zh: ja, jpn, zh, zh-CHS, zh-Hans,
+# zh-Hant, ...) and the subtitle is majority-Latin, the pair is treated as
+# cross-language (verifier boundary) regardless of transcript surface script.
+# Limitation: a transliterated transcript with language "und"/"en" stays on
+# the same-script lexical path (documented residual).
+CJK_LANGUAGE_SUBTAGS = ("ja", "zh")
 
 
 def normalize_text(text: str) -> str:
@@ -60,18 +68,30 @@ def script_profile(text: str) -> tuple[float, float]:
     return (cjk / len(letters), latin / len(letters))
 
 
-def is_cross_language(subtitle_text: str, transcript_text: str) -> bool:
-    """True when one side is majority-Latin and the other majority-CJK.
+def _transcript_language_is_cjk(language: str | None) -> bool:
+    primary = (language or "").strip().lower().split("-")[0]
+    return primary.startswith(CJK_LANGUAGE_SUBTAGS)
 
-    Heuristic: a script is "majority" when its ratio of alphabetic characters
-    exceeds SCRIPT_MAJORITY (0.5). Cross-language means the lexical score is
-    meaningless as agreement evidence.
+
+def is_cross_language(
+    subtitle_text: str, transcript_text: str, language: str | None = None
+) -> bool:
+    """True when lexical comparison is meaningless as agreement evidence.
+
+    (1) Script rule: one side majority-Latin and the other majority-CJK
+    (ratio over alphabetic characters exceeding SCRIPT_MAJORITY); or
+    (2) translation-context rule: the ASR `language` names a CJK target
+    (ja*/zh*) while the subtitle is majority-Latin — covering transliterated
+    (romaji/pinyin) transcripts. With language=None/und, only rule (1)
+    applies.
     """
     s_cjk, s_latin = script_profile(subtitle_text)
     t_cjk, t_latin = script_profile(transcript_text)
-    return (s_latin > SCRIPT_MAJORITY and t_cjk > SCRIPT_MAJORITY) or (
+    if (s_latin > SCRIPT_MAJORITY and t_cjk > SCRIPT_MAJORITY) or (
         s_cjk > SCRIPT_MAJORITY and t_latin > SCRIPT_MAJORITY
-    )
+    ):
+        return True
+    return _transcript_language_is_cjk(language) and s_latin > SCRIPT_MAJORITY
 
 
 def semantic_match(subtitle_text: str, transcript_text: str) -> float:
@@ -239,7 +259,7 @@ def validate_proposal(
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                 f"{cid}: mock transcriber used; verdict forced to abstain\n"
             )
-        elif is_cross_language(subtitle_text, result.text):
+        elif is_cross_language(subtitle_text, result.text, language):
             # Lexical score is never accept-support and never reject evidence
             # across languages; only the semantic verifier boundary decides.
             if verifier is None:

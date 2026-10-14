@@ -11,20 +11,28 @@ _source_roots: list[Path] = []
 
 SAFE_ID_MAX_LEN = 128
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Windows reserved device names, incl. stem+extension forms like CON.txt
+_WINDOWS_RESERVED_RE = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.[A-Za-z0-9._-]*)?$", re.IGNORECASE
+)
 
 
 def is_safe_id(value: str) -> bool:
     """Strict validator for user-controlled ids used in paths/registry keys.
 
     Non-empty, at most SAFE_ID_MAX_LEN chars, charset [A-Za-z0-9._-] only (so
-    no '/', '\\', '..', NUL, whitespace, or shell/metacharacters), and no
-    leading '.' (so no '.'/'..' and no hidden files).
+    no '/', '\\', '..', NUL, whitespace, or shell/metacharacters), no leading
+    '.' (so no '.'/'..' and no hidden files), no trailing '.' (Windows path
+    smuggling), and never a Windows reserved device name (CON, PRN, AUX, NUL,
+    COM1-9, LPT1-9, case-insensitive, including CON.txt-style stems).
     """
     return (
         isinstance(value, str)
         and 0 < len(value) <= SAFE_ID_MAX_LEN
         and not value.startswith(".")
+        and value[-1] not in ". "
         and _SAFE_ID_RE.match(value) is not None
+        and _WINDOWS_RESERVED_RE.match(value) is None
     )
 
 
@@ -33,7 +41,8 @@ def require_safe_id(value: str, label: str) -> None:
         raise ValueError(
             f"REFUSED: {label} {value!r} is not a safe id (required: non-empty, "
             f"<= {SAFE_ID_MAX_LEN} chars, [A-Za-z0-9._-] only, no leading '.' "
-            "or path separators)"
+            "or path separators, no trailing '.'/space, not a Windows reserved "
+            "device name)"
         )
 
 

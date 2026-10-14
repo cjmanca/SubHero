@@ -34,8 +34,8 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 0.9s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 1.0s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.4s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.0s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.4s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.0s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-S01` (scenario S01)
@@ -73,8 +73,8 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 2.2s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 1.1s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 0.8s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 0.8s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 0.8s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 0.8s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-S02` (scenario S02)
@@ -104,8 +104,8 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 1.2s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 1.0s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.1s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.3s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.1s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.3s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-S03` (scenario S03)
@@ -126,13 +126,13 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-pxo-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 1 true, false-positive 0, jump threshold 250 ms); final timeline still discontinuous at 1 of 1 true breakpoints (0 without a straddling cue pair)
 - `b1-va` discontinuities: candidate-implied breakpoints 0 (matched 0 of 1 true, false-positive 0, jump threshold 250 ms); final timeline still discontinuous at 1 of 1 true breakpoints (0 without a straddling cue pair)
 - `b1-al`: unsupported · reason: alass executable not available · preprocess 0.0s · candidate 0.0s
-- `b1-fg`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 16 (cue e0016): input 'That is the third time today.' vs output 'I will make fresh leaves.'; 24 outputs vs 24 inputs; refu · preprocess 0.0s · candidate 0.8s
-- `b1-fp`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 16 (cue e0016): input 'That is the third time today.' vs output 'I will make fresh leaves.'; 24 outputs vs 24 inputs; refu · preprocess 0.0s · candidate 1.3s
+- `b1-fg`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 16 (cue e0016): input 'That is the third time today.' vs output 'I will make fresh leaves.'; 24 outputs vs 24 inputs; refusing to guess correspondence · preprocess 0.0s · candidate 0.8s
+- `b1-fp`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 16 (cue e0016): input 'That is the third time today.' vs output 'I will make fresh leaves.'; 24 outputs vs 24 inputs; refusing to guess correspondence · preprocess 0.0s · candidate 1.3s
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 0.8s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 0.9s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.4s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 3.4s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.4s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 3.4s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-S04` (scenario S04)
@@ -153,13 +153,13 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-pxo-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-va` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-al`: unsupported · reason: alass executable not available · preprocess 0.0s · candidate 0.0s
-- `b1-fg`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 4 (cue e0004): input 'I heard that too.' vs output 'Singing loud'; 24 outputs vs 24 inputs; refusing to guess corresponden · preprocess 0.0s · candidate 1.0s
-- `b1-fp`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 4 (cue e0004): input 'I heard that too.' vs output 'Singing loud'; 24 outputs vs 24 inputs; refusing to guess corresponden · preprocess 0.0s · candidate 3.9s
+- `b1-fg`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 4 (cue e0004): input 'I heard that too.' vs output 'Singing loud'; 24 outputs vs 24 inputs; refusing to guess correspondence · preprocess 0.0s · candidate 1.0s
+- `b1-fp`: mapping_failure_ambiguous_text · reason: tool rewrote events: normalized text mismatch at position 4 (cue e0004): input 'I heard that too.' vs output 'Singing loud'; 24 outputs vs 24 inputs; refusing to guess correspondence · preprocess 0.0s · candidate 3.9s
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 3.4s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 0.9s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.0s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 5.2s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.0s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 5.2s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-S06` (scenario S06)
@@ -189,8 +189,8 @@ about real-speech synchronization, and it is not a production threshold. See den
 - `b1-n`: noop · reason: no changes proposed · preprocess 0.0s · candidate 0.0s
 - `b1-px-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 0.9s
 - `b1-px-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals) · preprocess 0.0s · candidate 1.0s
-- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.3s
-- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a d · preprocess 0.0s · candidate 1.3s
+- `b1-pxo-fg`: 1:1-order-preserving · reason: ffsubsync fg; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.3s
+- `b1-pxo-fp`: 1:1-order-preserving · reason: ffsubsync fp; full-track flattened timing proposals only (formatting never applied to originals); oracle-assisted diagnostic arm (uses gold cue labels; excluded from --all; not a default candidate) · preprocess 0.0s · candidate 1.3s
 - `b1-va`: not_run · reason: no local ASR endpoint configured (BENCH_ASR_BASE_URL/BENCH_ASR_MODEL); validation not run; original timing retained
 
 ## Case `Fx00-SGN01` (scenario S01)

@@ -108,7 +108,7 @@ def build_report(
         for r in case_runs:
             bits = [f"- `{r['candidate_id']}`: {r['status']}"]
             if r.get("reason"):
-                bits.append(f"reason: {r['reason'][:180]}")
+                bits.append(f"reason: {r['reason'][:400]}")
             if r.get("wall_seconds") is not None:
                 bits.append(f"wall {r['wall_seconds']:.1f}s")
             if r.get("preprocessing_seconds") is not None:
@@ -134,8 +134,9 @@ def build_report(
 
 
 def write_report(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     from .paths import ensure_scratch_path
 
-    ensure_scratch_path(path)
-    path.write_text(text, encoding="utf-8")
+    # Validate the exact destination FIRST: a refused path must create nothing.
+    resolved = ensure_scratch_path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(text, encoding="utf-8")

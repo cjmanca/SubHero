@@ -159,7 +159,11 @@ $env:BENCH_SEM_VERIFY_API_KEY = "<optional>"
 
 Subtitles/transcript text leave the machine only to that endpoint; confirm it is local and
 permitted before configuring it. Verifier posture: `match` → accept, `no_match` → reject,
-`unknown`/call-failure → abstain (logged). **Unconfigured verifier**: every cross-language
+`unknown`/call-failure → abstain (logged). Routing includes transliteration: when the ASR
+`--language` names a CJK target (`ja*`/`zh*`) and the subtitle is majority-Latin, the pair
+is cross-language even if the transcript came back as romaji/pinyin — the lexical score
+never rejects it. Limitation: a transliterated transcript with language `und`/`en` stays on
+the same-script lexical path. **Unconfigured verifier**: every cross-language
 sample abstains with the reason that cross-language lexical differences are not evidence,
 and if no usable evidence exists at all the record is `not_run` with original timing
 retained — valid translations are never systematically false-rejected. Same-script pairs
@@ -213,6 +217,11 @@ Private-data home and CLI protection (enforced, not just policy):
   write `.case.json` manifests into the committed `benchmarks/cases/` directory; all
   other sources (e.g. `private-local`) write under `benchmarks/private/cases/`.
   `case list`, `run`, `score`, and `report` find manifests in both locations.
+- Rights claims are enumerated (`private-local`, `redistributable-synthetic-fixture`;
+  any other value is refused) and coherent: a `redistributable-synthetic-fixture`
+  registration is accepted only when the media and all sidecar/gold paths resolve
+  inside the committed `benchmarks/fixtures/` home; real episodes — including
+  out-of-repo mounts — register as `private-local`.
 
 ## Safety invariants enforced by this harness
 
@@ -243,6 +252,14 @@ Private-data home and CLI protection (enforced, not just policy):
   before any directory creation or write; `run_candidate` additionally validates
   case/candidate ids defensively before creating scratch dirs (exit 2, nothing created).
 - `report --out` writes only inside scratch roots (`ensure_scratch_path`; refusal exits 5).
+  Validation runs before any parent directory is created — a refused path creates nothing.
+- Ids additionally reject Windows reserved device names (CON/NUL/COM1-9/LPT1-9/…, incl.
+  `CON.txt` stems) and trailing dots/spaces. Media with no audio stream fails closed at
+  run (`REFUSED`, rc 4) instead of crashing.
+- The semantic verifier prompt is injection-hardened: a system message frames the
+  `<subtitle>`/`<transcript>` blocks as UNTRUSTED DATA (never instructions) and the
+  response is parsed strictly (exact JSON object, or one fenced JSON block; anything
+  else is `unknown` → abstain).
 
 ## Tests
 
@@ -252,7 +269,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 132 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 151 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 

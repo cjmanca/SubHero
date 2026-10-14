@@ -19,6 +19,9 @@ def _setup_cli_root(tmp_path):
 
 def test_cli_matrix_fingerprint_verification_blocks_tampered_source(tmp_path, capsys):
     root, fx = _setup_cli_root(tmp_path)
+    # M7 rights coherence: tmp copies are not in the committed fixtures home, so
+    # they must register as private-local (synthetic rights are refused for
+    # out-of-fixtures paths); private case manifests route to private/cases/.
     argv_add = [
         "--root",
         str(root),
@@ -33,7 +36,7 @@ def test_cli_matrix_fingerprint_verification_blocks_tampered_source(tmp_path, ca
         "--gold",
         f"main={fx / 'gold_episode.json'}",
         "--rights",
-        "redistributable-synthetic-fixture",
+        "private-local",
     ]
     assert cli.main(argv_add) == 0
     assert (
@@ -57,7 +60,7 @@ def test_cli_matrix_fingerprint_verification_blocks_tampered_source(tmp_path, ca
         )
         == 0
     )
-    manifest = (root / "cases" / "C1.case.json").read_text(encoding="utf-8")
+    manifest = (root / "private" / "cases" / "C1.case.json").read_text(encoding="utf-8")
     assert str(root) not in manifest
     (fx / "episode.ass").write_text(
         (fx / "episode.ass").read_text(encoding="utf-8")

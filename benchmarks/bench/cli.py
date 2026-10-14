@@ -319,6 +319,19 @@ def cmd_source_add(args, paths) -> int:
         if reason is not None:
             print(f"REFUSED (private data policy): {reason}", file=sys.stderr)
             return 2
+    # Rights-claim coherence: a redistributable-synthetic-fixture registration
+    # must point at the committed fixtures home; real episodes declare private-local.
+    if args.rights == SYNTHETIC_RIGHTS:
+        fixtures_home = (REPO_ROOT / "benchmarks" / "fixtures").resolve()
+        for target in policy_targets:
+            if not _under_root(target, fixtures_home):
+                print(
+                    f"REFUSED (rights claim): --rights {SYNTHETIC_RIGHTS} requires "
+                    f"the media and all sidecar/gold paths to live inside "
+                    f"{fixtures_home}; register real episodes with --rights private-local",
+                    file=sys.stderr,
+                )
+                return 2
     sources = _load_sources(paths["sources"])
     if args.source_id in sources["sources"]:
         print(f"source id already registered: {args.source_id}", file=sys.stderr)
@@ -553,6 +566,11 @@ def _get_reference_audio(
                 f"source {case.source_id} has {n_audio} audio streams but no "
                 "persisted audio_selected; re-register with --audio so the "
                 "intended track is decoded"
+            )
+        if n_audio == 0:
+            raise StreamSelectionError(
+                f"source {case.source_id} media has no audio stream; register "
+                "audio-bearing reference media"
             )
         audio_stream = None
     scratch_case = paths["scratch"] / case.case_id
@@ -843,7 +861,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="track_id=path to gold classification JSON (cue_id -> speech_like|non_speech)",
     )
-    pa.add_argument("--rights", default="private-local")
+    pa.add_argument(
+        "--rights",
+        default="private-local",
+        choices=("private-local", SYNTHETIC_RIGHTS),
+        help="rights claim: private-local (real episodes) or "
+        f"{SYNTHETIC_RIGHTS} (must point inside benchmarks/fixtures/)",
+    )
     pa.add_argument("--notes", default="")
     pa.set_defaults(func=cmd_source_add)
     pl = ssub.add_parser("list")

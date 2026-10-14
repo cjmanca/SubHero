@@ -59,6 +59,11 @@ def _register_private_source(tmp_path) -> Path:
     return root
 
 
+def _registry_bytes(sources_path: Path) -> bytes:
+    """Registry bytes for snapshot guards; b'' when absent (fresh clone)."""
+    return sources_path.read_bytes() if sources_path.exists() else b""
+
+
 def test_source_add_refuses_in_repo_media_outside_allowed(capsys):
     guard_dir = BENCH_ROOT / "_scratch" / "priv-guard-media"
     sources_path = BENCH_ROOT / "cases" / "sources.json"
@@ -66,7 +71,7 @@ def test_source_add_refuses_in_repo_media_outside_allowed(capsys):
         guard_dir.mkdir(parents=True, exist_ok=True)
         stub = guard_dir / "episode.mkv"
         stub.write_bytes(b"stub")
-        before = sources_path.read_bytes() if sources_path.exists() else b""
+        before = _registry_bytes(sources_path)
         rc = cli.main(
             [
                 "source",
@@ -79,14 +84,14 @@ def test_source_add_refuses_in_repo_media_outside_allowed(capsys):
                 "private-local",
             ]
         )
-        after = sources_path.read_bytes() if sources_path.exists() else b""
+        after = _registry_bytes(sources_path)
     finally:
         shutil.rmtree(guard_dir, ignore_errors=True)
     captured = capsys.readouterr()
     assert rc == 2
     assert "REFUSED (private data policy)" in captured.err
     assert before == after
-    assert "PRIVGUARD-M" not in sources_path.read_text(encoding="utf-8")
+    assert "PRIVGUARD-M" not in _registry_bytes(sources_path).decode("utf-8", "replace")
 
 
 def test_source_add_refuses_in_repo_sidecar_outside_allowed(tmp_path, capsys):
@@ -95,7 +100,7 @@ def test_source_add_refuses_in_repo_sidecar_outside_allowed(tmp_path, capsys):
     media.write_bytes(b"stub")
     sources_path = BENCH_ROOT / "cases" / "sources.json"
     evil_sidecar = BENCH_ROOT / "cases" / "evil.ass"
-    before = sources_path.read_bytes()
+    before = _registry_bytes(sources_path)
     rc = cli.main(
         [
             "source",
@@ -114,7 +119,7 @@ def test_source_add_refuses_in_repo_sidecar_outside_allowed(tmp_path, capsys):
     assert rc == 2
     assert "REFUSED (private data policy)" in captured.err
     assert not evil_sidecar.exists()
-    assert sources_path.read_bytes() == before
+    assert _registry_bytes(sources_path) == before
 
 
 def test_source_add_refuses_in_repo_gold_outside_allowed(tmp_path, capsys):
@@ -122,7 +127,7 @@ def test_source_add_refuses_in_repo_gold_outside_allowed(tmp_path, capsys):
     media.parent.mkdir(parents=True)
     media.write_bytes(b"stub")
     sources_path = BENCH_ROOT / "cases" / "sources.json"
-    before = sources_path.read_bytes()
+    before = _registry_bytes(sources_path)
     rc = cli.main(
         [
             "source",
@@ -140,7 +145,7 @@ def test_source_add_refuses_in_repo_gold_outside_allowed(tmp_path, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "REFUSED (private data policy)" in captured.err
-    assert sources_path.read_bytes() == before
+    assert _registry_bytes(sources_path) == before
     assert not (BENCH_ROOT / "transcripts").exists()
 
 
