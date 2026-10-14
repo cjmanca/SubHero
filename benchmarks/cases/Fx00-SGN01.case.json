@@ -22,9 +22,9 @@
     ]
   },
   "fmt": "ass",
-  "generated_path": "C:\\Documents\\projects\\SubHero\\benchmarks\\_scratch\\Fx00-SGN01\\corrupted.ass",
+  "generated_path": "_scratch/Fx00-SGN01/corrupted.ass",
   "generated_subtitle_sha256": "373e9a9d1278d940b2a0fc598218d101e17235ae2aceec1f5baf884cfbca5573",
-  "gold_classification_path": "benchmarks\\fixtures\\Fx00\\gold_signs.json",
+  "gold_classification_path": "fixtures/Fx00/gold_signs.json",
   "grid_us": 10000,
   "injected_cue_deltas": {
     "e0000": [

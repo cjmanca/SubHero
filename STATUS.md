@@ -33,6 +33,8 @@
 
 - Real reference episodes absent → G0/G1 remain blocked (external input required).
 - No numeric acceptance thresholds calibrated (by design; single-fixture synthetic runs are correlated, denominators = 1 episode).
+- Adversarial read-only review (2026-10-14) findings triaged: P1s fixed (central scratch write guards incl. CLI-refused `report --out` outside roots; full-track tool-output mapping by file order with unsorted-event regression test); P2s fixed (run/score fingerprint verification aborting on tamper; b1-va candidate stamping; S02 zero-injection guard + 1.00005 scale removed; ASR confidence no longer inverts low-logprob transcripts); P3s fixed (end-boundary scoring, abstention-status exactness, residual-domain breakpoint detection, repo-root-relative manifest paths, dead code removed, fixture-audio wording corrected). Reviewer note: ASR confidence inversion verified by trace only (no local endpoint configured); will need re-verification when a real endpoint is used.
+- Deferred P3: memory/VRAM resource measurement not implemented (wall/preprocess/candidate/ASR seconds recorded); acceptable for B0 baseline.
 
 ## Next action
 

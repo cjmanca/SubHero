@@ -83,6 +83,8 @@ def score_case(
     per_cue: dict[str, dict] = {}
     onset_errors_final: list[int] = []
     onset_errors_proposed: list[int] = []
+    end_errors_proposed: list[int] = []
+    end_errors_final: list[int] = []
     altered, unaltered = [], []
 
     for cid in cues:
@@ -104,10 +106,16 @@ def score_case(
             onset_err_corrupted = c[0] - o[0]
             onset_err_proposed = (p[0] - o[0]) if p else onset_err_corrupted
             onset_err_final = f[0] - o[0]
+            end_err_proposed = (p[1] - o[1]) if p else c[1] - o[1]
+            end_err_final = f[1] - o[1]
             rec["onset_err_proposed_us"] = onset_err_proposed
             rec["onset_err_final_us"] = onset_err_final
+            rec["end_err_proposed_us"] = end_err_proposed
+            rec["end_err_final_us"] = end_err_final
             onset_errors_proposed.append(onset_err_proposed)
             onset_errors_final.append(onset_err_final)
+            end_errors_proposed.append(end_err_proposed)
+            end_errors_final.append(end_err_final)
             if abs(injected[0]) > tol.good_us:
                 altered.append(cid)
                 if abs(onset_err_final) <= tol.good_us:
@@ -146,13 +154,16 @@ def score_case(
 
     detected_breaks: list[int] = []
     regions = proposal.regions
-    for a, b in itertools.pairwise(regions):
-        if a.get("offset_us") != b.get("offset_us"):
-            gap_mid = (
-                (a["end_us"] if a.get("end_us") is not None else b["start_us"])
-                + b["start_us"]
-            ) // 2
-            detected_breaks.append(int(gap_mid))
+    break_order = sorted(
+        (cid for cid in per_cue if "onset_err_final_us" in per_cue[cid]),
+        key=lambda cid: per_cue[cid]["original_us"][0],
+    )
+    jump_threshold = max(2 * tol.good_us, 250_000)
+    for a, b in itertools.pairwise(break_order):
+        ra = per_cue[a]["onset_err_final_us"]
+        rb = per_cue[b]["onset_err_final_us"]
+        if abs(rb - ra) > jump_threshold:
+            detected_breaks.append(int(per_cue[b]["original_us"][0]))
 
     matched_true = 0
     for tb in case.true_breakpoints_us:
@@ -194,6 +205,8 @@ def score_case(
         },
         "timing_errors_proposed_us": _stats([abs(e) for e in onset_errors_proposed]),
         "timing_errors_final_us": _stats([abs(e) for e in onset_errors_final]),
+        "timing_errors_proposed_end_us": _stats([abs(e) for e in end_errors_proposed]),
+        "timing_errors_final_end_us": _stats([abs(e) for e in end_errors_final]),
         "counts": {
             "repaired": sum(1 for r in per_cue.values() if r.get("repaired")),
             "repaired_proposed": sum(
@@ -213,8 +226,15 @@ def score_case(
             "proposals_nonzero": nonzero_proposals,
             "accepted_nonzero": nonzero_accepted,
             "abstained_regions": len(regions)
-            if proposal.mapping_status.startswith(
-                ("abstain", "not_run", "unsupported", "no")
+            if proposal.mapping_status
+            in (
+                "abstain_no_speech_anchors",
+                "not_run",
+                "unsupported",
+                "timeout",
+                "failed",
+                "invalid_output",
+                "mapping_failure_count_mismatch",
             )
             else 0,
             "regions_total": len(regions),

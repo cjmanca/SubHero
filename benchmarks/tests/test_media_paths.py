@@ -52,6 +52,7 @@ def test_sha256_file(tmp_path):
 
 
 def test_subtitle_roundtrip_preserves_styles_layers(fixture_dir, tmp_path):
+    paths.configure([tmp_path], [fixture_dir], [])
     track = Track.load(fixture_dir / "episode.ass")
     times = {c.cue_id: (c.start_us + 100_000, c.end_us + 100_000) for c in track.cues}
     out = tmp_path / "out.ass"

@@ -87,13 +87,8 @@ class HTTPLocalTranscriber:
         secs = time.monotonic() - started
         resp.raise_for_status()
         payload = resp.json()
-        confidence = (
-            float(payload.get("segments", [{}])[0].get("avg_logprob", -1))
-            if payload.get("segments")
-            else -1.0
-        )
-        if confidence < -1.0:
-            confidence = 0.5
+        segments = payload.get("segments") or []
+        confidence = float(segments[0].get("avg_logprob", -1.0)) if segments else -1.0
         return Transcription(
             text=payload.get("text", ""),
             confidence=confidence,

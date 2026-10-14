@@ -51,6 +51,49 @@ def _load_case(p: Path) -> CaseManifest:
     return CaseManifest(**d)
 
 
+def _resolve_under_root(paths: dict[str, Path], raw: str | Path) -> Path:
+    gp = Path(raw)
+    return gp if gp.is_absolute() else (paths["root"] / gp).resolve()
+
+
+def _resolve_generated(paths: dict[str, Path], case: CaseManifest) -> Path:
+    return _resolve_under_root(paths, case.generated_path)
+
+
+def _verify_sources(
+    paths: dict[str, Path],
+    source_id: str,
+    sources: dict,
+    case: CaseManifest | None = None,
+) -> list[str]:
+    problems: list[str] = []
+    s = sources["sources"].get(source_id)
+    if s is None:
+        return [f"source {source_id} no longer registered"]
+    media = Path(s["media_path"])
+    if not media.is_file():
+        problems.append("registered media file missing")
+    elif sha256_file(media) != s["media_sha256"]:
+        problems.append("SOURCE MUTATION DETECTED: media fingerprint changed")
+    for track_id, spec in s.get("subtitle_specs", {}).items():
+        recorded = s.get("subtitle_sha256", {}).get(track_id)
+        if spec.startswith("sidecar:") and recorded:
+            p = Path(spec.removeprefix("sidecar:"))
+            if not p.is_file():
+                problems.append(f"registered subtitle {track_id} missing")
+            elif sha256_file(p) != recorded:
+                problems.append(
+                    f"SOURCE MUTATION DETECTED: subtitle {track_id} fingerprint changed"
+                )
+    if case is not None:
+        generated = _resolve_generated(paths, case)
+        if not generated.is_file():
+            problems.append("generated corrupted file missing from scratch")
+        elif sha256_file(generated) != case.generated_subtitle_sha256:
+            problems.append("case input no longer matches case manifest fingerprint")
+    return problems
+
+
 def cmd_source_add(args, paths) -> int:
     media = Path(args.path).resolve()
     if not media.exists():
@@ -149,6 +192,11 @@ def cmd_case_prepare(args, paths) -> int:
     else:
         print(f"unsupported subtitle spec {spec}", file=sys.stderr)
         return 2
+    problems = _verify_sources(paths, args.source_id, sources)
+    if problems:
+        for p in problems:
+            print(f"SOURCE CHECK FAILED: {p}", file=sys.stderr)
+        return 3
     out = (
         scratch_case / "corrupted.ass"
         if src_ass.suffix.lower() in (".ass", ".ssa")
@@ -165,6 +213,21 @@ def cmd_case_prepare(args, paths) -> int:
         gold_classification_path=Path(gold) if gold else None,
         notes=args.notes,
     )
+    try:
+        rel = Path(case.generated_path).resolve().relative_to(paths["root"].resolve())
+        case.generated_path = rel.as_posix()
+    except ValueError:
+        pass
+    if case.gold_classification_path:
+        try:
+            relg = (
+                Path(case.gold_classification_path)
+                .resolve()
+                .relative_to(paths["root"].resolve())
+            )
+            case.gold_classification_path = relg.as_posix()
+        except ValueError:
+            pass
     case_path = paths["cases"] / f"{case_id}.case.json"
     write_json(case_path, case.to_json())
     print(f"prepared case {case_id} -> {out} (manifest {case_path})")
@@ -208,7 +271,13 @@ def cmd_run(args, paths) -> int:
             rc = 2
             continue
         case = _load_case(case_path)
-        corrupted = Track.load(Path(case.generated_path), case.fmt)
+        problems = _verify_sources(paths, case.source_id, sources, case)
+        if problems:
+            for p in problems:
+                print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
+            return 3
+        corrupted_path = _resolve_generated(paths, case)
+        corrupted = Track.load(corrupted_path, case.fmt)
         corrupted_times = corrupted.time_map()
         cue_text = {c.cue_id: c.text for c in corrupted.cues}
         ref_wav = _get_reference_audio(paths, case, sources)
@@ -220,14 +289,16 @@ def cmd_run(args, paths) -> int:
                 cand,
                 case,
                 corrupted_times,
-                Path(case.generated_path),
+                corrupted_path,
                 ref_wav,
                 scratch_dir,
                 tools,
                 tol_us=args.tol_good_us,
-                gold_classification_path=Path(case.gold_classification_path)
-                if case.gold_classification_path
-                else None,
+                gold_classification_path=(
+                    _resolve_under_root(paths, case.gold_classification_path)
+                    if case.gold_classification_path
+                    else None
+                ),
             )
             write_json(scratch_dir / "proposal.json", proposal.to_json())
             write_json(
@@ -298,7 +369,13 @@ def cmd_score(args, paths) -> int:
     )
     for case_id in args.case:
         case = _load_case(paths["cases"] / f"{case_id}.case.json")
-        corrupted = Track.load(Path(case.generated_path), case.fmt)
+        sources = _load_sources(paths["sources"])
+        problems = _verify_sources(paths, case.source_id, sources, case)
+        if problems:
+            for p in problems:
+                print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
+            return 3
+        corrupted = Track.load(_resolve_generated(paths, case), case.fmt)
         corrupted_times = corrupted.time_map()
         candidates = list(CANDIDATES) if args.all else args.candidate
         for cand in candidates:
@@ -307,6 +384,7 @@ def cmd_score(args, paths) -> int:
             if not prop_path.exists():
                 continue
             proposal = ProposalRecord(**read_json(prop_path))
+            proposal.candidate_id = cand
             acceptance = None
             acc_path = d / "acceptance.json"
             if acc_path.exists():
@@ -319,6 +397,7 @@ def cmd_score(args, paths) -> int:
             ):
                 continue
             score = score_case(case, proposal, corrupted_times, acceptance, tol)
+            score["candidate_id"] = cand
             write_json(d / "score.json", score)
             print(
                 f"scored {case_id}/{cand}: median final onset err {score['timing_errors_final_us']['median_abs_us']} us"
@@ -344,7 +423,11 @@ def cmd_report(args, paths) -> int:
                 scores.append(read_json(d / "score.json"))
     text = build_report(list(case_ids), runs, scores, versions)
     out = Path(args.out) if args.out else paths["results"] / "report.md"
-    write_report(out, text)
+    try:
+        write_report(out, text)
+    except RuntimeError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 5
     print(f"report written: {out}")
     return 0
 

@@ -4,9 +4,9 @@ Cue IDs (`eNNNN`) are assigned by event order when loading a file; every
 benchmark transformation preserves event count and order, so IDs stay stable.
 Only timing fields are ever modified; text, styles, layers, effects and
 formatting are round-tripped through pysubs2 untouched. ASS event files keep
-stable identity. SRT identity assumes standard time-ordered source files:
-because SRT writers re-sort by start time, a deliberately out-of-order SRT
-source is not a supported benchmark track type.
+stable identity. pysubs2 writers emit events in source file order; full-track
+arms therefore map tool output back positionally by file order and treat any
+count change as a mapping failure.
 """
 
 from __future__ import annotations
@@ -92,6 +92,9 @@ class Track:
             ev.start = start_us // 1000
             ev.end = end_us // 1000
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        from .paths import ensure_scratch_path
+
+        ensure_scratch_path(out_path)
         doc.save(out_path, format=self.format)
 
     def time_map(self) -> dict[str, tuple[int, int]]:

@@ -57,9 +57,9 @@
     "segments": []
   },
   "fmt": "ass",
-  "generated_path": "C:\\Documents\\projects\\SubHero\\benchmarks\\_scratch\\Fx00-S04\\corrupted.ass",
+  "generated_path": "_scratch/Fx00-S04/corrupted.ass",
   "generated_subtitle_sha256": "891421161619104bb6756b5fcb1d3dcd0959c3856b02f162a2ab0b9caea3e9d1",
-  "gold_classification_path": "benchmarks\\fixtures\\Fx00\\gold_episode.json",
+  "gold_classification_path": "fixtures/Fx00/gold_episode.json",
   "grid_us": 10000,
   "injected_cue_deltas": {
     "e0000": [

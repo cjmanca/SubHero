@@ -150,6 +150,9 @@ def validate_proposal(
 
     samples = plan_samples(case, proposal, corrupted_times, seed)
     scratch_dir.mkdir(parents=True, exist_ok=True)
+    from .paths import ensure_scratch_path
+
+    ensure_scratch_path(scratch_dir)
     asr_seconds = 0.0
     asr_calls = 0
     verdicts: dict[int, list[str]] = {}

@@ -16,6 +16,7 @@ from pathlib import Path
 import pysubs2
 
 from .manifests import CaseManifest, ProposalRecord
+from .paths import ensure_scratch_path
 from .proxy import ProxyMapping, build_proxy, fit_regions
 
 CANDIDATES = {
@@ -105,14 +106,12 @@ def _proposal_for_indices(
     corrupted_times: dict[str, tuple[int, int]],
     tol_us: int,
     notes: str,
+    full_track_ids: list[str] | None = None,
 ) -> ProposalRecord:
     if mapping is not None:
         ids = mapping.proxy_index_to_cue
     else:
-        ids = sorted(
-            corrupted_times,
-            key=lambda cid: (corrupted_times[cid][0], corrupted_times[cid][1]),
-        )
+        ids = list(full_track_ids or [])
     if len(out_times) != len(ids):
         return ProposalRecord(
             case_id=case.case_id,
@@ -223,6 +222,7 @@ def run_candidate(
             return rec, meta
 
         mapping: ProxyMapping | None = None
+        full_ids: list[str] = []
         if use_proxy:
             t0 = time.monotonic()
             proxy_srt = scratch_dir / "proxy.srt"
@@ -246,14 +246,21 @@ def run_candidate(
                 return rec, meta
             in_srt = proxy_srt
             out_srt = scratch_dir / "proxy.synced.srt"
+            ensure_scratch_path(out_srt)
             out_fmt = "srt"
         else:
             in_srt = scratch_dir / "full.srt"
+            full_track = _reload_track(corrupted_path, case.fmt)
+            full_ids = [
+                c.cue_id for c in sorted(full_track.cues, key=lambda c: c.order)
+            ]
             doc = pysubs2.SSAFile.load(
                 corrupted_path, format=case.fmt, keep_privates=True
             )
+            ensure_scratch_path(in_srt)
             doc.save(in_srt, format="srt")
             out_srt = scratch_dir / "full.synced.srt"
+            ensure_scratch_path(out_srt)
             out_fmt = "srt"
 
         cmd = [
@@ -312,6 +319,7 @@ def run_candidate(
             corrupted_times,
             tol_us,
             notes=f"ffsubsync {mode}; full-track flattened timing proposals only (formatting never applied to originals)",
+            full_track_ids=full_ids,
         )
         rec.candidate_id = candidate_id
         return rec, meta
@@ -333,9 +341,13 @@ def run_candidate(
             exe = [tools.alass]
         meta["tool_versions"]["alass"] = probe_version(exe)
         in_ass = scratch_dir / "in.ass"
+        full_track = _reload_track(corrupted_path, case.fmt)
+        full_ids = [c.cue_id for c in sorted(full_track.cues, key=lambda c: c.order)]
         doc = pysubs2.SSAFile.load(corrupted_path, format=case.fmt, keep_privates=True)
+        ensure_scratch_path(in_ass)
         doc.save(in_ass, format="ass")
         out_ass = scratch_dir / "out.ass"
+        ensure_scratch_path(out_ass)
         cmd = [*exe, str(reference_media), str(in_ass), str(out_ass)]
         code, out, err, secs = _run(cmd, timeout, None)
         meta["candidate_seconds"] += secs
@@ -357,7 +369,13 @@ def run_candidate(
             return rec, meta
         times = _load_events(out_ass, "ass")
         rec = _proposal_for_indices(
-            case, times, None, corrupted_times, tol_us, "alass 1:1 event order"
+            case,
+            times,
+            None,
+            corrupted_times,
+            tol_us,
+            "alass 1:1 event order",
+            full_track_ids=full_ids,
         )
         rec.candidate_id = "b1-al"
         return rec, meta

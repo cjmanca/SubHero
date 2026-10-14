@@ -50,9 +50,9 @@ python benchmarks\run_bench.py report --case Fx00-S01 --out benchmarks\results\r
 ```
 
 `benchmarks\reports\Fx00-plumbing-report.md` is the committed sample report from a
-genuine executed offline run. The synthetic fixture has tone-burst "audio" at
-dialogue midpoints: it validates harness plumbing only, **not** speech-synchronization
-quality, and no thresholds are calibrated from it.
+genuine executed offline run. The synthetic fixture's audio consists of tone bursts
+filling the dialogue windows (silence outside them): it validates harness plumbing
+only, **not** speech-synchronization quality, and no thresholds are calibrated from it.
 
 ## Arms
 
@@ -101,9 +101,13 @@ absolute local paths) and the scratch/results trees are git-ignored.
 
 ## Safety invariants enforced by this harness
 
-- Sources opened read-only; fingerprints recorded at registration; mutation of a registered
-  source is detected by fingerprint mismatch.
-- Corruptions are written only to scratch; `prepare_case` refuses to overwrite the original.
+- Sources opened read-only; fingerprints recorded at registration; `run` and `score`
+  recompute registered media/sidecar fingerprints plus the case input fingerprint before
+  any execution or scoring and abort (rc 3, `SOURCE CHECK FAILED`) on any mismatch.
+- Corruptions and all generated artifacts (manifests, reports, proxies, excerpts, logs)
+  are written only under scratch roots; every write path passes through
+  `paths.ensure_scratch_path`, which refuses source roots and `--forbidden-root` trees.
+  `prepare_case` refuses to overwrite the original.
 - Injected invalid (negative/unordered) timestamps raise and are reported — never clamped.
 - Tool output is used for timing proposals only; flattened tool output is never scored/applied
   as the final subtitle; signs-only tracks remain unmapped/unchanged.
@@ -119,7 +123,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 42 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 49 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 

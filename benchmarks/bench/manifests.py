@@ -131,6 +131,9 @@ class AcceptanceRecord:
 
 def write_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    from .paths import ensure_scratch_path
+
+    ensure_scratch_path(path)
     path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",

@@ -90,14 +90,12 @@ def build_proxy(
             )
         )
     out_srt.parent.mkdir(parents=True, exist_ok=True)
+    from .paths import ensure_scratch_path
+
+    ensure_scratch_path(out_srt)
     doc.save(out_srt, format="srt")
     write_json(mapping_json, mapping.to_json())
     return mapping
-
-
-def check_1to1_output(proxy_count: int, out_doc: pysubs2.SSAFile) -> bool:
-    """ffsubsync-style tools must preserve entry count and order 1:1."""
-    return len(out_doc.events) == proxy_count
 
 
 def fit_regions(

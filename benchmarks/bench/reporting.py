@@ -114,4 +114,7 @@ def build_report(
 
 def write_report(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    from .paths import ensure_scratch_path
+
+    ensure_scratch_path(path)
     path.write_text(text, encoding="utf-8")

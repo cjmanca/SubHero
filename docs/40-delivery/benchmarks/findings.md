@@ -19,12 +19,13 @@ Mark `not_run`, `blocked`, `in_progress`, `completed` or `invalidated` explicitl
 ## Observed B0/B1 infrastructure evidence (2026-10-14, offline synthetic only)
 
 - Environment: Python 3.14.0; `ffsubsync 0.5.1` (installed; `--split-penalty`, framerate flags verified against installed version); `ffmpeg`/`ffprobe` present; **ALASS not installed**; no ASR model endpoint configured.
-- Harness behavior verified on the redistributable `Fx00` synthetic fixture (tone-burst audio at dialogue midpoints — plumbing validation only):
+- Harness behavior verified on the redistributable `Fx00` synthetic fixture (tone bursts filling dialogue windows — plumbing validation only):
   - Deterministic corruption generators S00–S04/S06 with recorded per-cue injected deltas and exact inverse maps; repeated same-seed preparation produces byte-identical output; invalid timestamp injections (negative starts) raise `InvalidTime` and are rejected, never clamped.
   - Clean S00 controls produced zero harmful accepted corrections for global arms (`b1-fg`, `b1-px-fg`); piecewise arms introduced small 6–44 ms tails on controls on the tone fixture.
   - Signs-only tracks: proxy arms record `abstain_no_speech_anchors` and leave timing unchanged; direct arms produced harmful accepted corrections (3.6 s median residual), i.e. the negative control exposes exactly the false-anchor hazard the proxy design targets.
-  - Tool-absent states recorded as `unsupported` (ALASS) and `not_run` (targeted-ASR without endpoint); no synthetic zero-scores were fabricated.
-  - 42 focused offline tests pass; `ruff check`/`ruff format --check` clean.
+  - Tool-absent states recorded as `unsupported` (ALASS) and `not_run` (targeted-ASR without endpoint); `not_run`/`unsupported`/`abstain`/mapping-failure states recorded honestly, with no synthetic zero-scores fabricated.
+  - 49 focused offline tests pass; `ruff check`/`ruff format --check` clean.
+  - Independent read-only adversarial review conducted; accepted findings fixed and locked with regression tests: central scratch-root write guards on manifests/reports/subtitle saves/proxy outputs/tool outputs/validator logs (CLI-refused `report --out` outside scratch roots), fingerprint verification before every `run`/`score` (aborts with SOURCE CHECK FAILED on tamper), full-track tool-output mapping by preserved file order (unsorted-event regression test), S02 zero-injection guard (drift scales that quantize away are rejected), validated arm relabeled as `b1-va` in scores, end-boundary timing errors scored alongside onsets, abstention-status exactness, breakpoint detection computed in the original timeline domain, and repo-root-relative paths in committed case manifests.
 - Sample machine-readable + human report: `benchmarks/reports/Fx00-plumbing-report.md` (synthetic denominators: 1 fixture episode; all variants correlated).
 - **Conclusion so far:** the harness can execute the B1 matrix and score it honestly; **no candidate is adopted**, and the G1 gate has no real-media evidence. Real-episode registration procedure and stream-selection requirements are documented in `benchmarks/README.md`.
 

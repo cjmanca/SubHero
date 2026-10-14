@@ -62,7 +62,6 @@ def build_transform(
             (23_976, 25_000),
             (1_001_000, 1_000_000),
             (999_000, 1_000_000),
-            (1_000_050, 1_000_000),
         ]
         num, den = choices[int(rng.integers(0, len(choices)))]
         params = {"scenario": "S02", "scale": [num, den]}
@@ -162,6 +161,13 @@ def prepare_case(
 
     track.save_with_times(out_path, times)
     inverse = transform.inverse(track.grid_us, cue_regions)
+
+    if scenario in ("S01", "S02", "S03", "S04") and all(
+        ds == 0 and de == 0 for ds, de in injected.values()
+    ):
+        raise ValueError(
+            f"{scenario} seed {seed} injected no grid-detectable timing change; choose a larger-magnitude seed"
+        )
 
     return CaseManifest(
         case_id=case_id,
