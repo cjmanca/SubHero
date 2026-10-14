@@ -24,6 +24,17 @@ identity, with script detection only as a fallback signal:
 Script profiling covers Hangul, Cyrillic, Greek, Arabic and Devanagari in
 addition to kana/ideographs/Latin; a dominant-script contrast is one signal
 among language identity, never the sole cross-language gate.
+
+Acceptance quality gate (P2 fix F07): automatic acceptance requires a usable
+ASR reliability signal on the sampled transcript in EVERY language path. A
+semantic-verifier "match" over an unreliable transcript — the documented -1.0
+no-metric sentinel, confidence below MIN_CONFIDENCE, or a signal this module
+cannot interpret — abstains and never accepts; acceptance quality must not
+depend on which language path fired. Verifier "no_match" rejection is verifier
+evidence (not an acceptance path) and does not depend on transcript
+reliability. ASR-reliability abstentions are recorded with their own note
+counter so a later targeted-re-sampling feature (explicitly out of scope) can
+act on the abstention reason.
 """
 
 from __future__ import annotations
@@ -33,6 +44,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .asr import MISSING_CONFIDENCE_SENTINEL
 from .manifests import AcceptanceRecord, CaseManifest, ProposalRecord
 from .media import extract_audio_window
 
@@ -144,6 +156,31 @@ def _dice(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return 2 * len(a & b) / (len(a) + len(b))
+
+
+def _transcript_reliable(result) -> bool | None:
+    """Usable-transcript gate shared by every language path for automatic acceptance.
+
+    True  -> the transcription carries usable reliability evidence
+             (``confidence >= MIN_CONFIDENCE``);
+    False -> it reports low reliability (usable signal, below threshold);
+    None  -> this backend/result carries NO usable reliability signal at all
+             (the documented ``-1.0`` no-metric sentinel = absence of evidence,
+             a missing attribute, or a signal this helper cannot interpret).
+
+    Only True may support an automatic accept; False and None abstain (unknown
+    signals NEVER auto-accept). A future backend with a different reliability
+    signal (per-token score, status flag, ...) slots in here without touching
+    the decision paths.
+    """
+    confidence = getattr(result, "confidence", None)
+    if confidence is None:
+        return None
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return None
+    if confidence == MISSING_CONFIDENCE_SENTINEL:
+        return None
+    return bool(confidence >= MIN_CONFIDENCE)
 
 
 def normalize_language(code: str | None) -> str | None:
@@ -368,6 +405,7 @@ def validate_proposal(
     no_verifier_cross_lang = 0
     verifier_no_verdict = 0
     identity_unknown_abstentions = 0
+    low_confidence_abstentions = 0
     mock_verifier_used = False
     audio_identity = normalize_language(language)
     subtitle_identity = normalize_language(subtitle_language)
@@ -377,13 +415,19 @@ def validate_proposal(
         and audio_identity == subtitle_identity
     )
 
-    def run_verifier(region: int, subtitle_text: str, transcript_text: str) -> None:
+    def run_verifier(
+        region: int, subtitle_text: str, transcript_text: str, reliable: bool | None
+    ) -> None:
         """Send one sample to the semantic verifier boundary and record its verdict.
 
         The verifier is translation-tolerant and receives the RESOLVED language
-        hints (never a hardcoded "und"). match -> accept, no_match -> reject,
+        hints (never a hardcoded "und"). match + usable transcript reliability
+        (F07 gate) -> accept; match over an unreliable/no-signal transcript ->
+        abstain (recorded as an ASR-reliability abstention, never an accept);
+        no_match -> reject (verifier evidence, not an acceptance path);
         unknown/exception -> abstain (no usable verdict)."""
-        nonlocal asr_seconds, verifier_no_verdict, mock_verifier_used
+        nonlocal asr_seconds, verifier_no_verdict, low_confidence_abstentions
+        nonlocal mock_verifier_used
         try:
             sv = verifier.verdict(
                 subtitle_text, transcript_text, subtitle_language, language
@@ -402,7 +446,15 @@ def validate_proposal(
                 f"{cid}: mock semantic verifier used; test-only\n"
             )
         if sv.verdict == "match":
-            verdicts.setdefault(region, []).append("accept")
+            if reliable is True:
+                verdicts.setdefault(region, []).append("accept")
+            else:
+                verdicts.setdefault(region, []).append("abstain")
+                low_confidence_abstentions += 1
+                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                    f"{cid}: verifier match not accepted: ASR reliability signal "
+                    "missing/unusable; abstained\n"
+                )
         elif sv.verdict == "no_match":
             verdicts.setdefault(region, []).append("reject")
         else:
@@ -435,6 +487,7 @@ def validate_proposal(
         asr_calls += 1
         subtitle_text = cue_text.get(cid, "")
         ratio = semantic_match(subtitle_text, result.text)
+        reliable = _transcript_reliable(result)
         if result.mock:
             verdicts.setdefault(region, []).append("abstain")
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
@@ -443,35 +496,44 @@ def validate_proposal(
         elif is_cross_language(subtitle_text, result.text, language, subtitle_language):
             # Lexical score is never accept-support and never reject evidence
             # across languages; only the semantic verifier boundary decides.
+            # The F07 reliability gate applies to the verifier's ACCEPT verdict
+            # inside run_verifier; no_match stays a verifier-evidence reject.
             if verifier is None:
                 verdicts.setdefault(region, []).append("abstain")
                 no_verifier_cross_lang += 1
                 continue
-            run_verifier(region, subtitle_text, result.text)
+            run_verifier(region, subtitle_text, result.text, reliable)
+        elif reliable is not True:
+            # Shared quality gate (F07): a lexical-path accept requires a usable
+            # ASR reliability signal; a missing sentinel / low / uninterpretable
+            # signal is NOT accept evidence. Reject stays available only with
+            # usable reliability on a verified same-language pair (below).
+            verdicts.setdefault(region, []).append("abstain")
+            low_confidence_abstentions += 1
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: ASR reliability signal missing/unusable; abstained\n"
+            )
         elif same_identity:
-            # Verified same-language pair: lexical agreement is accept-support
-            # and lexical disagreement is genuine CONTRADICTION evidence.
-            if ratio >= MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+            # Verified same-language pair with usable reliability: lexical
+            # agreement is accept-support and lexical disagreement is genuine
+            # CONTRADICTION evidence.
+            if ratio >= MIN_MATCH_RATIO:
                 verdicts.setdefault(region, []).append("accept")
-            elif ratio < MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+            else:
                 verdicts.setdefault(region, []).append("reject")
-            else:
-                verdicts.setdefault(region, []).append("abstain")
-        elif ratio >= MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+        elif ratio >= MIN_MATCH_RATIO:
             # Identity not fully verified and scripts do not contrast: positive
-            # lexical support with confidence is still valid accept evidence.
+            # lexical support with a usable reliability signal is valid accept
+            # evidence.
             verdicts.setdefault(region, []).append("accept")
-        elif ratio < MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+        elif verifier is not None:
             # Identity not verified: low overlap is NOT sufficient negative
-            # evidence. Route to the verifier when configured, else abstain
-            # (never reject on an unverified identity).
-            if verifier is not None:
-                run_verifier(region, subtitle_text, result.text)
-            else:
-                verdicts.setdefault(region, []).append("abstain")
-                identity_unknown_abstentions += 1
+            # evidence. Route to the verifier when configured (never reject on
+            # an unverified identity without verifier evidence).
+            run_verifier(region, subtitle_text, result.text, reliable)
         else:
             verdicts.setdefault(region, []).append("abstain")
+            identity_unknown_abstentions += 1
 
     accepted_regions: list[dict] = []
     rejected_regions: list[dict] = []
@@ -509,6 +571,15 @@ def validate_proposal(
         "sampling: edges/split-sides/largest-changes/fixed+seeded-random controls",
         "mock runs never accepted",
     ]
+    if low_confidence_abstentions:
+        notes_parts.append(
+            f"{low_confidence_abstentions} samples: ASR transcript reliability "
+            "signal missing/unusable (no-metric sentinel -1.0, below "
+            "MIN_CONFIDENCE, or unavailable for this backend); automatic "
+            "acceptance requires usable reliability evidence in every language "
+            "path; abstained (targeted re-sampling is a later feature keyed on "
+            "this note)"
+        )
     if no_verifier_cross_lang:
         notes_parts.append(
             f"{no_verifier_cross_lang} cross-language samples abstained: semantic "

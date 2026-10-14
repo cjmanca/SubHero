@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from bench import validator
 from bench.asr import (
+    MISSING_CONFIDENCE_SENTINEL,
     HTTPSemanticVerifier,
     MockSemanticVerifier,
     SemanticVerdict,
@@ -251,6 +252,210 @@ def test_mock_transcriber_still_forces_abstain_even_with_match_verifier(
     assert acc.status == "abstain"
     assert acc.accepted_regions == []
     assert acc.accepted_times_us == corrupted
+
+
+# --- F07: ASR reliability gate on EVERY automatic-acceptance path -----------------
+
+
+def _validate_conf(
+    tmp_path,
+    monkeypatch,
+    cue_text,
+    transcript,
+    verifier,
+    language,
+    confidence,
+    subtitle_language="und",
+):
+    monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
+    case, proposal, corrupted = _hand_case(cue_text)
+    asr = _FakeASR({cid: transcript for cid in cue_text}, confidence=confidence)
+    acc = validator.validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run",
+        asr,
+        language,
+        1,
+        verifier=verifier,
+        subtitle_language=subtitle_language,
+    )
+    return acc, proposal, corrupted
+
+
+@pytest.mark.parametrize("confidence", [-1.0, -0.9])
+def test_cross_language_verifier_match_with_unreliable_transcript_abstains(
+    tmp_path, monkeypatch, confidence
+):
+    # Core F07 regression: a verifier "match" over a transcript whose
+    # reliability signal is the missing sentinel (-1.0 = NO evidence) or low
+    # (-0.9) must NOT auto-accept; it abstains with an explicit low-reliability
+    # note and zero accepted regions/times.
+    cue_text = {cid: EN_SUB for cid in ("e0000", "e0001", "e0002")}
+    verifier = MockSemanticVerifier({EN_SUB: "match"})
+    acc, _proposal, corrupted = _validate_conf(
+        tmp_path, monkeypatch, cue_text, JA_MATCH, verifier, "ja", confidence
+    )
+    assert acc.status == "abstain"
+    assert acc.accepted_regions == []
+    assert acc.rejected_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert len(acc.sample_cue_ids) >= 1
+    assert (
+        f"{len(acc.sample_cue_ids)} samples: ASR transcript reliability signal "
+        "missing/unusable" in acc.notes
+    )
+    assert "mock semantic verifier used (test-only)" in acc.notes
+
+
+def test_cross_language_verifier_match_with_reliable_transcript_accepts(
+    tmp_path, monkeypatch
+):
+    # Gate must not break the good path: usable confidence + verifier match.
+    cue_text = {cid: EN_SUB for cid in ("e0000", "e0001", "e0002")}
+    verifier = MockSemanticVerifier({EN_SUB: "match"})
+    acc, proposal, _corrupted = _validate_conf(
+        tmp_path, monkeypatch, cue_text, JA_MATCH, verifier, "ja", 0.9
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.accepted_times_us == proposal.proposed_times_us
+    assert "ASR transcript reliability" not in acc.notes
+
+
+def test_cross_language_verifier_no_match_rejects_even_with_unreliable_transcript(
+    tmp_path, monkeypatch
+):
+    # Reject is verifier evidence, not an acceptance path: low reliability does
+    # NOT soften it.
+    cue_text = {cid: EN_OTHER for cid in ("e0000", "e0001", "e0002")}
+    verifier = MockSemanticVerifier({EN_OTHER: "no_match"})
+    acc, _proposal, corrupted = _validate_conf(
+        tmp_path, monkeypatch, cue_text, JA_CONTRADICTION, verifier, "ja", -1.0
+    )
+    assert acc.status == "success"
+    assert len(acc.rejected_regions) == 1
+    assert acc.accepted_times_us == corrupted
+    assert acc.accepted_regions == []
+
+
+def test_notes_separate_asr_reliability_from_verifier_no_verdict(tmp_path, monkeypatch):
+    # Mixed run: one cross-language sample blocked by the ASR-reliability gate
+    # (verifier match + sentinel transcript) and one abstained by the verifier
+    # giving no usable verdict. The notes must count them SEPARATELY, keeping
+    # the mock labeling.
+    monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
+    cids = ("e0000", "e0001")
+    original = {
+        "e0000": (10_000_000, 11_000_000),
+        "e0001": (20_000_000, 21_000_000),
+    }
+    corrupted = {
+        cid: (s + 5_000_000, e + 5_000_000) for cid, (s, e) in original.items()
+    }
+    case = CaseManifest(
+        case_id="sem-f07-notes",
+        source_id="SEM",
+        scenario="S01",
+        seed=1,
+        track_id="episode",
+        fmt="ass",
+        grid_us=10_000,
+        params={"scenario": "S01", "offset_us": 5_000_000},
+        transform={},
+        expected_inverse={},
+        injected_cue_deltas={cid: (5_000_000, 5_000_000) for cid in cids},
+        original_times_us=original,
+        true_breakpoints_us=[],
+        original_subtitle_sha256="0" * 64,
+        generated_subtitle_sha256="0" * 64,
+        generated_path="gen.ass",
+    )
+    proposal = ProposalRecord(
+        "sem-f07-notes",
+        "b1-px-fg",
+        "1:1-order-preserving",
+        [
+            {"start_us": 0, "end_us": 15_000_000, "offset_us": -5_000_000},
+            {"start_us": 15_000_000, "end_us": None, "offset_us": -5_000_000},
+        ],
+        dict(original),
+        [],
+        "",
+    )
+    cue_text = {"e0000": EN_SUB, "e0001": EN_OTHER}
+    # Only EN_SUB has a canned "match"; EN_OTHER falls through to "unknown".
+    verifier = MockSemanticVerifier({EN_SUB: "match"})
+    asr = _FakeASR(
+        {"e0000": JA_MATCH, "e0001": JA_MATCH}, confidence=MISSING_CONFIDENCE_SENTINEL
+    )
+    acc = validator.validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run-f07-notes",
+        asr,
+        "ja",
+        1,
+        verifier=verifier,
+        subtitle_language="en",
+    )
+    assert acc.accepted_regions == []
+    assert acc.rejected_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert "1 samples: ASR transcript reliability signal missing/unusable" in acc.notes
+    assert (
+        "1 cross-language samples: semantic verifier gave no usable verdict "
+        "(unknown/failure); abstained" in acc.notes
+    )
+    assert "mock semantic verifier used (test-only)" in acc.notes
+    notes_log = (tmp_path / "run-f07-notes" / "asr_notes.log").read_text(
+        encoding="utf-8"
+    )
+    assert "verifier match not accepted: ASR reliability signal missing/unusable" in (
+        notes_log
+    )
+
+
+def test_transcript_reliable_helper_semantics():
+    from bench.asr import MISSING_CONFIDENCE_SENTINEL
+    from bench.validator import _transcript_reliable
+
+    def _res(confidence):
+        return Transcription(text="t", confidence=confidence, seconds=0.0, model="m")
+
+    assert _transcript_reliable(_res(0.9)) is True
+    assert _transcript_reliable(_res(-0.5)) is True
+    assert _transcript_reliable(_res(-0.9)) is False
+    assert _transcript_reliable(_res(MISSING_CONFIDENCE_SENTINEL)) is None
+    assert _transcript_reliable(_res(None)) is None
+
+    class _NoSignal:
+        text = "t"
+
+    assert _transcript_reliable(_NoSignal()) is None
+
+
+def test_mock_transcriber_confidence_configurable_with_stable_default():
+    from bench.asr import MISSING_CONFIDENCE_SENTINEL, MockTranscriber
+
+    default = MockTranscriber({"c": "hello"}).transcribe_window(
+        Path("x.wav"), "en", key="c"
+    )
+    assert default.confidence == 1.0
+    assert default.mock is True
+    sentinel = MockTranscriber(
+        {"c": "hello"}, confidence=MISSING_CONFIDENCE_SENTINEL
+    ).transcribe_window(Path("x.wav"), "en", key="c")
+    assert sentinel.confidence == MISSING_CONFIDENCE_SENTINEL
+    assert sentinel.mock is True
 
 
 # --- F2: transliterated (all-Latin) ASR output routed by language ------------

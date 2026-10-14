@@ -18,9 +18,23 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Documented no-signal sentinel. Some ASR backends report no per-window
+# reliability metric at all; `Transcription.confidence` then carries this value
+# instead of a score. Consumers must treat it as MISSING evidence (never as a
+# usable low score, and never as accept-support); validators gate automatic
+# acceptance on an AVAILABLE reliability signal.
+MISSING_CONFIDENCE_SENTINEL = -1.0
+
 
 @dataclass
 class Transcription:
+    """One window transcription.
+
+    ``confidence`` is the backend's reliability signal on the log-probability
+    scale used by the benchmark; ``MISSING_CONFIDENCE_SENTINEL`` means the
+    backend reported NO reliability signal for this window.
+    """
+
     text: str
     confidence: float
     seconds: float
@@ -45,11 +59,20 @@ class VerifierUnavailable(RuntimeError):
 
 
 class MockTranscriber:
-    """Test double; requires explicit canned utterances. Never used for real reports."""
+    """Test double; requires explicit canned utterances. Never used for real reports.
 
-    def __init__(self, utterances: dict[str, str], model: str = "mock"):
+    ``confidence`` is test-configurable (default 1.0) so tests can exercise the
+    reliability gate; production wiring and the HTTP backend are unaffected."""
+
+    def __init__(
+        self,
+        utterances: dict[str, str],
+        model: str = "mock",
+        confidence: float = 1.0,
+    ):
         self.utterances = dict(utterances)
         self.model = model
+        self.confidence = confidence
 
     def transcribe_window(
         self, wav_path: Path, language: str, key: str | None = None
@@ -58,7 +81,7 @@ class MockTranscriber:
         text = self.utterances.get(key or str(wav_path), "")
         return Transcription(
             text=text,
-            confidence=1.0,
+            confidence=self.confidence,
             seconds=time.monotonic() - started,
             model=self.model,
             mock=True,
@@ -106,7 +129,13 @@ class HTTPLocalTranscriber:
         resp.raise_for_status()
         payload = resp.json()
         segments = payload.get("segments") or []
-        confidence = float(segments[0].get("avg_logprob", -1.0)) if segments else -1.0
+        # No segments -> no reliability signal: carry the documented sentinel so
+        # validators can distinguish "missing metric" from a usable low score.
+        confidence = (
+            float(segments[0].get("avg_logprob", MISSING_CONFIDENCE_SENTINEL))
+            if segments
+            else MISSING_CONFIDENCE_SENTINEL
+        )
         return Transcription(
             text=payload.get("text", ""),
             confidence=confidence,

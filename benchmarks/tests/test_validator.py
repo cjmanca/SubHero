@@ -206,6 +206,38 @@ def test_same_language_lexical_reject_preserved(tmp_path, monkeypatch):
     assert acc.accepted_times_us == corrupted
 
 
+def test_same_language_lexical_accept_requires_reliable_transcript(
+    tmp_path, monkeypatch
+):
+    _stub_windows(monkeypatch)
+    cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
+    case, proposal, corrupted = _hand_case(cue_text)
+    asr = _FakeASR({cid: "the door is open" for cid in cue_text}, confidence=-1.0)
+    acc = validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run-lex-sentinel",
+        asr,
+        "en",
+        1,
+        verifier=None,
+        subtitle_language="en",
+    )
+    # Shared F07 gate: a perfect lexical match over a missing-sentinel transcript
+    # is NOT automatic-accept evidence; the region abstains.
+    assert acc.status == "abstain"
+    assert acc.accepted_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert (
+        f"{len(acc.sample_cue_ids)} samples: ASR transcript reliability signal "
+        "missing/unusable" in acc.notes
+    )
+
+
 def test_cross_language_pairing_detection(tmp_path, monkeypatch):
     _stub_windows(monkeypatch)
     cue_text = {
