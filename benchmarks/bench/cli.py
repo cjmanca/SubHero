@@ -1136,6 +1136,16 @@ def cmd_score(args, paths) -> int:
             d = paths["results"] / case_id / cand
             prop_path = d / "proposal.json"
             if not prop_path.exists():
+                # A proposal.json that has been deleted/moved away must never
+                # leave a prior generation's score.json behind (the report
+                # binding is a backstop, not the fix). Delete it and treat the
+                # arm as a provenance refusal (rc 6) ONLY when a score.json
+                # existed to delete: a plain never-run arm (no proposal, no
+                # score) keeps skipping silently so a normal ``--all`` over an
+                # untouched matrix stays rc 0.
+                if (d / "score.json").exists():
+                    _delete_stale_score(d, f"{case_id}/{cand}", "proposal.json missing")
+                    rc = 6
                 continue
             # Provenance gate: a persisted proposal is scoreable only when its
             # run.json binds it to THIS case generation (fingerprint) and its
@@ -1212,19 +1222,48 @@ def cmd_report(args, paths) -> int:
     case_ids = args.case or sorted(
         p.name.split(".")[0] for p in _iter_case_paths(paths)
     )
+    sources = _load_sources(paths["sources"])
+    current_fingerprints: dict[tuple, str] = {}
     runs, scores, versions = [], [], {}
     for case_id in case_ids:
+        # Generation binding: recompute each arm's CURRENT fingerprint from the
+        # live case manifest + registry source + the run's recorded tool_versions
+        # so a self-consistent run/score pair from an OLDER case generation (its
+        # fingerprint is internally consistent but predates a re-prepare) can be
+        # dropped, not just an unbound one. When the case/source cannot be
+        # loaded the recomputation is skipped for that arm (fail-open to the
+        # existing fingerprint-match binding, never more aggressive).
+        case_path = _lookup_case_path(paths, case_id)
+        case = None
+        if case_path is not None:
+            try:
+                case = _load_case(case_path)
+            except (OSError, ValueError):
+                case = None
+        source = sources["sources"].get(case.source_id) if case is not None else None
         for d in (
             (paths["results"] / case_id).iterdir()
             if (paths["results"] / case_id).exists()
             else []
         ):
             if (d / "run.json").exists():
-                runs.append(read_json(d / "run.json"))
-                versions.update(read_json(d / "run.json").get("tool_versions", {}))
+                run = read_json(d / "run.json")
+                runs.append(run)
+                versions.update(run.get("tool_versions", {}))
+                if case is not None and source is not None:
+                    cand = run.get("candidate_id")
+                    if cand:
+                        current_fingerprints[(run.get("case_id"), cand)] = (
+                            compute_input_fingerprint(
+                                case,
+                                source,
+                                cand,
+                                run.get("tool_versions", {}),
+                            )
+                        )
             if (d / "score.json").exists():
                 scores.append(read_json(d / "score.json"))
-    text = build_report(list(case_ids), runs, scores, versions)
+    text = build_report(list(case_ids), runs, scores, versions, current_fingerprints)
     out = Path(args.out) if args.out else paths["results"] / "report.md"
     try:
         write_report(out, text)

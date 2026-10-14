@@ -190,6 +190,18 @@ def _score(root: Path, case_id: str, cand: str = "b1-n") -> int:
     )
 
 
+def _score_all(root: Path, case_id: str) -> int:
+    return cli.main(["--root", str(root), "score", "--case", case_id, "--all"])
+
+
+def _report(root: Path, case_id: str) -> int:
+    return cli.main(["--root", str(root), "report", "--case", case_id])
+
+
+def _report_text(root: Path) -> str:
+    return (root / "results" / "report.md").read_text(encoding="utf-8")
+
+
 def _cand_dir(root: Path, case_id: str, cand: str) -> Path:
     return root / "results" / case_id / cand
 
@@ -655,3 +667,87 @@ def test_single_sidecar_stem_alias_still_resolves(tmp_path, fixture_dir, monkeyp
     assert (
         captured["subtitle_language"] == "kor"
     )  # stem alias bridges the case track_id
+
+
+# ---------------------------------------------------------------------------
+# P2 residual: proposal-missing stale-score deletion + report generation binding
+# ---------------------------------------------------------------------------
+
+
+def test_proposal_removal_deletes_stale_score_refuses_and_report_has_no_row(
+    tmp_path, fixture_dir, capsys
+):
+    """Reproduce the review probe: gen-A run+score, re-prepare as gen-B, run the
+    arm (writes gen-B run.json + proposal.json), delete proposal.json, then
+    ``score --all``. The bound gen-A score.json must NOT survive: it is deleted
+    and the run refuses with rc 6, and the report renders no row for the arm."""
+    root, _media = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "PROP", "S01", 1) == 0
+    assert _run(root, "PROP") == 0
+    assert _score(root, "PROP", "b1-n") == 0
+    d = _cand_dir(root, "PROP", "b1-n")
+    assert (d / "score.json").is_file()
+    # Re-prepare the same case_id as a NEW generation, then re-run b1-n so the
+    # directory holds a gen-B run.json/proposal.json and the surviving gen-A
+    # score.json.
+    assert _prepare(root, "PROP", "S02", 2) == 0
+    assert _run(root, "PROP") == 0
+    (d / "proposal.json").unlink()
+    capsys.readouterr()
+    assert _score_all(root, "PROP") == RC_STALE
+    captured = capsys.readouterr()
+    assert "proposal.json missing" in captured.err
+    assert "deleted stale score.json" in captured.err
+    assert not (d / "score.json").exists()
+    assert _report(root, "PROP") == 0
+    assert "| b1-n |" not in _report_text(root)  # no bound number left to render
+
+
+def test_report_drops_stale_bound_pair_after_reprepare(tmp_path, fixture_dir):
+    """A gen-A run.json + score.json form a self-consistent bound pair. After
+    re-preparing the same case_id as gen-B WITHOUT re-running, the fingerprint
+    match (score fp == run fp) alone would render it under gen-B's manifest. The
+    generation binding recomputes the CURRENT fingerprint and drops the pair,
+    counted as stale-generation (not unbound), with rc 0."""
+    root, _media = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "STALE", "S01", 1) == 0
+    assert _run(root, "STALE") == 0
+    assert _score(root, "STALE", "b1-n") == 0
+    d = _cand_dir(root, "STALE", "b1-n")
+    run_fp = _load(d / "run.json")["input_fingerprint"]
+    score_fp = _load(d / "score.json")["input_fingerprint"]
+    assert run_fp == score_fp  # the pair the fingerprint-match binding alone trusts
+    # Re-prepare as a new generation; do NOT touch results/.
+    assert _prepare(root, "STALE", "S02", 2) == 0
+    assert _load(d / "run.json")["input_fingerprint"] == run_fp  # pair unchanged
+    assert _report(root, "STALE") == 0
+    report = _report_text(root)
+    assert "dropped stale-generation rows: 1" in report
+    assert "dropped unbound score rows: 0" in report
+    assert "| b1-n |" not in report
+
+
+def test_fresh_full_pipeline_scores_and_reports_rows(tmp_path, fixture_dir):
+    root, _media = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "FRESH", "S01", 1) == 0
+    assert _run(root, "FRESH") == 0
+    assert _score(root, "FRESH", "b1-n") == 0
+    assert _report(root, "FRESH") == 0
+    report = _report_text(root)
+    assert "| b1-n |" in report
+    assert "dropped unbound score rows: 0" in report
+    assert "dropped stale-generation rows: 0" in report
+
+
+def test_never_run_arm_keeps_score_all_rc_zero(tmp_path, fixture_dir, capsys):
+    """A never-run arm (no proposal.json, no score.json) must keep ``--all`` at
+    rc 0: the proposal-missing deletion/refusal fires only when a stale
+    score.json exists to delete."""
+    root, _media = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "NEVER", "S01", 1) == 0
+    assert _run(root, "NEVER") == 0
+    assert _score(root, "NEVER", "b1-n") == 0
+    capsys.readouterr()
+    assert _score_all(root, "NEVER") == 0
+    captured = capsys.readouterr()
+    assert "deleted stale score.json" not in captured.err

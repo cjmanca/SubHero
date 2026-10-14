@@ -16,6 +16,7 @@ def build_report(
     runs: list[dict],
     scores: list[dict],
     tool_versions: dict[str, str],
+    current_fingerprints: dict[tuple, str] | None = None,
 ) -> str:
     """Render schema_version-2 scores; v1 (residual-domain detection) rows are ignored.
 
@@ -27,6 +28,19 @@ def build_report(
     DROPPED and counted in ``dropped unbound score rows: N`` so the report never
     renders an unbound number. Legacy rows/runs are still never silently
     trusted, and legacy entries must not crash rendering.
+
+    Generation binding (P2 residual): when ``current_fingerprints`` maps each
+    ``(case_id, candidate_id)`` to the CURRENT fingerprint recomputed from the
+    live case manifest + registry source (+ the arm's recorded tool_versions), a
+    run/score pair whose recorded fingerprint is self-consistent but differs
+    from that CURRENT value belongs to an OLDER case generation (a re-prepare
+    with a new seed/scenario, a re-registered audio selection, a mutated source)
+    and is DROPPED (both the run and the score) and counted in
+    ``dropped stale-generation rows: M``. This catches the run/score pair the
+    fingerprint-match binding alone cannot (that binding only proves the score
+    matches its own run, not that the pair matches the current case). Passing
+    ``current_fingerprints=None`` (the default, e.g. direct library callers)
+    keeps the pre-existing fingerprint-match behavior exactly.
     """
     scores = [s for s in scores if int(s.get("schema_version", 0)) == 2]
     run_fingerprints: dict[tuple, set] = {}
@@ -35,6 +49,23 @@ def build_report(
         if fp:
             key = (r.get("case_id"), r.get("candidate_id"))
             run_fingerprints.setdefault(key, set()).add(fp)
+    dropped_stale_generation = 0
+    if current_fingerprints is not None:
+
+        def _stale_row(row: dict) -> bool:
+            key = (row.get("case_id"), row.get("candidate_id"))
+            current = current_fingerprints.get(key)
+            fp = row.get("input_fingerprint")
+            return bool(fp) and current is not None and fp != current
+
+        runs = [r for r in runs if not _stale_row(r)]
+        kept_scores: list[dict] = []
+        for s in scores:
+            if _stale_row(s):
+                dropped_stale_generation += 1
+            else:
+                kept_scores.append(s)
+        scores = kept_scores
     bound_scores: list[dict] = []
     dropped_unbound = 0
     for s in scores:
@@ -58,6 +89,11 @@ def build_report(
     lines.append(
         f"dropped unbound score rows: {dropped_unbound} (schema-2 scores with no "
         "fingerprint-matching run.json in the same case/candidate are never rendered)"
+    )
+    lines.append(
+        f"dropped stale-generation rows: {dropped_stale_generation} (schema-2 scores "
+        "bound to a run.json whose recorded fingerprint differs from the current "
+        "case generation are never rendered)"
     )
     lines.append("")
     if tool_versions:
