@@ -16,8 +16,9 @@ from pathlib import Path
 import pysubs2
 
 from .manifests import CaseManifest, ProposalRecord
-from .paths import ensure_scratch_path
+from .paths import ensure_scratch_path, require_safe_id
 from .proxy import ProxyMapping, build_proxy, fit_regions
+from .validator import normalize_text
 
 CANDIDATES: dict[str, tuple[str, str, dict]] = {
     "b1-n": ("noop", "No-op baseline", {"oracle": False, "default": True}),
@@ -123,25 +124,41 @@ def _run(
     return proc.returncode, proc.stdout, proc.stderr, time.monotonic() - started
 
 
-def _load_events(path: Path, fmt: str) -> list[tuple[int, int]]:
-    doc = pysubs2.SSAFile.load(path, format=fmt, keep_privates=True)
-    return [(ev.start * 1000, ev.end * 1000) for ev in doc.events]
+def _load_ssa(path: Path, fmt: str):
+    return pysubs2.SSAFile.load(path, format=fmt, keep_privates=True)
+
+
+def _load_events_with_text(path: Path, fmt: str) -> list[tuple[int, int, str]]:
+    return [
+        (ev.start * 1000, ev.end * 1000, ev.text) for ev in _load_ssa(path, fmt).events
+    ]
 
 
 def _proposal_for_indices(
     case: CaseManifest,
-    out_times: list[tuple[int, int]],
+    out_events: list[tuple[int, int, str]],
     mapping: ProxyMapping | None,
     corrupted_times: dict[str, tuple[int, int]],
     tol_us: int,
     notes: str,
     full_track_ids: list[str] | None = None,
+    input_events: list[tuple[int, int, str]] | None = None,
 ) -> ProposalRecord:
+    """Map tool output back to cue IDs.
+
+    Identity requires BOTH conditions:
+    1. exact event-count equality (positional mapping is only defined then);
+    2. cue correspondence by TEXT: at every mapped position, the output
+       event's normalized text must equal the input event's normalized text
+       (tools may change timings only; reordering, merged/rewritten text, or
+       any other rewrite is an ambiguous correspondence, refused — never
+       guessed).
+    """
     if mapping is not None:
         ids = mapping.proxy_index_to_cue
     else:
         ids = list(full_track_ids or [])
-    if len(out_times) != len(ids):
+    if len(out_events) != len(ids):
         return ProposalRecord(
             case_id=case.case_id,
             candidate_id="",
@@ -149,11 +166,42 @@ def _proposal_for_indices(
             regions=[],
             proposed_times_us={},
             unmapped_cue_ids=list(corrupted_times.keys()),
-            notes=f"tool output has {len(out_times)} entries vs {len(ids)} inputs; refusing to guess correspondence",
+            notes=f"tool output has {len(out_events)} entries vs {len(ids)} inputs; refusing to guess correspondence",
         )
+    input_events = list(input_events or [])
+    out_texts = [t for _, _, t in out_events]
+    if len(input_events) != len(out_texts):
+        return ProposalRecord(
+            case_id=case.case_id,
+            candidate_id="",
+            mapping_status="mapping_failure_ambiguous_text",
+            regions=[],
+            proposed_times_us={},
+            unmapped_cue_ids=list(corrupted_times.keys()),
+            notes=(
+                f"cannot verify cue correspondence: {len(input_events)} input texts "
+                f"vs {len(out_texts)} output texts; refusing to guess correspondence"
+            ),
+        )
+    for pos, (cid, tin, tout) in enumerate(zip(ids, input_events, out_texts)):
+        if normalize_text(tin[2]) != normalize_text(tout):
+            return ProposalRecord(
+                case_id=case.case_id,
+                candidate_id="",
+                mapping_status="mapping_failure_ambiguous_text",
+                regions=[],
+                proposed_times_us={},
+                unmapped_cue_ids=list(corrupted_times.keys()),
+                notes=(
+                    f"tool rewrote events: normalized text mismatch at position "
+                    f"{pos} (cue {cid}): input {tin[2]!r} vs output {tout!r}; "
+                    f"{len(out_events)} outputs vs {len(ids)} inputs; refusing to "
+                    "guess correspondence"
+                ),
+            )
     proposed: dict[str, tuple[int, int]] = {}
     deltas: list[tuple[int, int]] = []
-    for cue_id, (start_us, end_us) in zip(ids, out_times):
+    for cue_id, (start_us, end_us, _text) in zip(ids, out_events):
         c_start, _c_end = corrupted_times[cue_id]
         proposed[cue_id] = (start_us, end_us)
         deltas.append((c_start, start_us - c_start))
@@ -196,6 +244,10 @@ def run_candidate(
         "preprocessing_seconds": 0.0,
         "candidate_seconds": 0.0,
     }
+    # Defensive identity validation: refuse unsafe ids BEFORE any filesystem
+    # effect (scratch_dir.mkdir below), so traversal attempts create nothing.
+    require_safe_id(candidate_id, "candidate id")
+    require_safe_id(case.case_id, "case id")
     scratch_dir.mkdir(parents=True, exist_ok=True)
     timeout = tools.timeouts.get(candidate_id, 900)
     is_oracle = candidate_id in ORACLE_DIAGNOSTIC_IDS
@@ -350,7 +402,7 @@ def run_candidate(
             )
             return rec, meta
 
-        times = _load_events(out_srt, out_fmt)
+        times = _load_events_with_text(out_srt, out_fmt)
         notes = (
             f"ffsubsync {mode}; full-track flattened timing proposals only "
             "(formatting never applied to originals)"
@@ -365,6 +417,7 @@ def run_candidate(
             tol_us,
             notes=notes,
             full_track_ids=full_ids,
+            input_events=_load_events_with_text(in_srt, "srt"),
         )
         rec.candidate_id = candidate_id
         return rec, meta
@@ -412,7 +465,7 @@ def run_candidate(
                 (err or out)[-800:],
             )
             return rec, meta
-        times = _load_events(out_ass, "ass")
+        times = _load_events_with_text(out_ass, "ass")
         rec = _proposal_for_indices(
             case,
             times,
@@ -421,6 +474,7 @@ def run_candidate(
             tol_us,
             "alass 1:1 event order",
             full_track_ids=full_ids,
+            input_events=_load_events_with_text(in_ass, "ass"),
         )
         rec.candidate_id = "b1-al"
         return rec, meta

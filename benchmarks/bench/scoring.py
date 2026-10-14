@@ -303,6 +303,7 @@ def score_case(
                 "failed",
                 "invalid_output",
                 "mapping_failure_count_mismatch",
+                "mapping_failure_ambiguous_text",
             )
             else 0,
             "regions_total": len(regions),

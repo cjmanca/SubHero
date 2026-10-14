@@ -34,7 +34,10 @@ SCRIPT_MAJORITY = 0.5
 
 
 def normalize_text(text: str) -> str:
-    text = re.sub(r"\\N", " ", text)
+    """Strip ASS override tags, convert line breaks (\\N and native newlines)
+    to newlines, collapse whitespace, case-fold. Final output matches the
+    historical behavior for all existing callers (collapsed whitespace)."""
+    text = re.sub(r"\\N", "\n", text)
     text = re.sub(r"\{[^}]*\}", "", text)
     text = re.sub(r"[^\w\s'â€™\-\u3040-\u30ff\u4e00-\u9fff]", " ", text)
     return re.sub(r"\s+", " ", text).strip().lower()

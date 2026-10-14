@@ -219,6 +219,20 @@ Private-data home and CLI protection (enforced, not just policy):
 - Tolerances (`--tol-good-us`, `--tol-severe-us`, `--tol-break-us`) are declared evaluation
   parameters, reported with every result; they are not production thresholds.
 - Unavailable tools/models record `not_run`/`unsupported`; abstention is a scored outcome.
+- **Cue-correspondence verification (never guess identity):** event-count equality alone is
+  not identity. After any external tool rewrites events (full-track, proxy, and ALASS arms),
+  each mapped output position must carry the same normalized text as the input event at that
+  position — normalization strips ASS override tags, converts `\N`/newlines, collapses
+  whitespace, and case-folds; tools may change timings only. Reordered, merged, or rewritten
+  text yields `mapping_failure_ambiguous_text` (zero proposed times, all cues unmapped, first
+  mismatch position reported), counted as an abstention in scoring.
+- **Strict user-id validation before any filesystem effect:** `--source-id`, `--track-id`,
+  `--case-id` (explicit and composed), and run/score/report case ids must match
+  `[A-Za-z0-9._-]`, be non-empty, ≤128 chars, and never start with `.` (no `..`, separators,
+  NUL, whitespace, metacharacters). Validation runs at the start of each command handler,
+  before any directory creation or write; `run_candidate` additionally validates
+  case/candidate ids defensively before creating scratch dirs (exit 2, nothing created).
+- `report --out` writes only inside scratch roots (`ensure_scratch_path`; refusal exits 5).
 
 ## Tests
 
@@ -228,7 +242,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 120 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 132 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 

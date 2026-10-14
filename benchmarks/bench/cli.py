@@ -23,7 +23,7 @@ from .asr import get_semantic_verifier, get_transcriber
 from .corrupt import prepare_case
 from .manifests import CaseManifest, ProposalRecord, read_json, write_json
 from .media import extract_audio, extract_subtitle_stream, ffprobe_streams, sha256_file
-from .paths import add_source_root, configure
+from .paths import add_source_root, configure, require_safe_id
 from .reporting import build_report, write_report
 from .scoring import Tolerances, score_case
 from .subtitles import Track
@@ -226,6 +226,16 @@ def _case_id_is_safe(case_id: str) -> bool:
     )
 
 
+def _refuse_unsafe_id(value: str, label: str) -> int | None:
+    """Return exit code 2 with a message when an id is unsafe; None if safe."""
+    try:
+        require_safe_id(value, label)
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 2
+    return None
+
+
 def _verify_sources(
     paths: dict[str, Path],
     source_id: str,
@@ -261,6 +271,14 @@ def _verify_sources(
 
 
 def cmd_source_add(args, paths) -> int:
+    refused = _refuse_unsafe_id(args.source_id, "source id")
+    if refused is not None:
+        return refused
+    for spec in list(args.subtitle or []) + list(args.gold or []):
+        track_id, _, _ = spec.partition("=")
+        refused = _refuse_unsafe_id(track_id, "track id")
+        if refused is not None:
+            return refused
     media = Path(args.path).resolve()
     if not media.exists():
         print(f"NOT FOUND: {media}", file=sys.stderr)
@@ -368,6 +386,9 @@ def cmd_source_list(args, paths) -> int:
 
 
 def cmd_source_inspect(args, paths) -> int:
+    refused = _refuse_unsafe_id(args.source_id, "source id")
+    if refused is not None:
+        return refused
     sources = _load_sources(paths["sources"])
     s = sources["sources"].get(args.source_id)
     if not s:
@@ -380,6 +401,18 @@ def cmd_source_inspect(args, paths) -> int:
 
 
 def cmd_case_prepare(args, paths) -> int:
+    # Validate ALL user-controlled ids up front, before any mkdir/write.
+    for value, label in (
+        (args.source_id, "source id"),
+        (args.track_id, "track id"),
+    ):
+        refused = _refuse_unsafe_id(value, label)
+        if refused is not None:
+            return refused
+    if args.case_id is not None:
+        refused = _refuse_unsafe_id(args.case_id, "case id")
+        if refused is not None:
+            return refused
     sources = _load_sources(paths["sources"])
     s = sources["sources"].get(args.source_id)
     if not s:
@@ -401,6 +434,9 @@ def cmd_case_prepare(args, paths) -> int:
             file=sys.stderr,
         )
         return 2
+    refused = _refuse_unsafe_id(case_id, "case id")
+    if refused is not None:
+        return refused
     scratch_case = paths["scratch"] / case_id
     scratch_case.mkdir(parents=True, exist_ok=True)
     if spec.startswith("sidecar:"):
@@ -538,6 +574,10 @@ def _all_candidate_ids() -> list[str]:
 
 def cmd_run(args, paths) -> int:
     sources = _load_sources(paths["sources"])
+    for case_id in args.case:
+        refused = _refuse_unsafe_id(case_id, "case id")
+        if refused is not None:
+            return refused
     candidates = _all_candidate_ids() if args.all else args.candidate
     tools = ToolConfig.detect()
     rc = 0
@@ -577,17 +617,21 @@ def cmd_run(args, paths) -> int:
                 cand_gold_path = _resolve_under_root(
                     paths, case.gold_classification_path
                 )
-            proposal, meta = run_candidate(
-                cand,
-                case,
-                corrupted_times,
-                corrupted_path,
-                ref_wav,
-                scratch_dir,
-                tools,
-                tol_us=args.tol_good_us,
-                gold_classification_path=cand_gold_path,
-            )
+            try:
+                proposal, meta = run_candidate(
+                    cand,
+                    case,
+                    corrupted_times,
+                    corrupted_path,
+                    ref_wav,
+                    scratch_dir,
+                    tools,
+                    tol_us=args.tol_good_us,
+                    gold_classification_path=cand_gold_path,
+                )
+            except ValueError as exc:
+                print(f"REFUSED ({case_id}/{cand}): {exc}", file=sys.stderr)
+                return 2
             write_json(scratch_dir / "proposal.json", proposal.to_json())
             write_json(
                 scratch_dir / "run.json",
@@ -662,6 +706,10 @@ def cmd_score(args, paths) -> int:
         break_match_us=args.tol_break_us,
     )
     for case_id in args.case:
+        refused = _refuse_unsafe_id(case_id, "case id")
+        if refused is not None:
+            return refused
+    for case_id in args.case:
         case_path = _lookup_case_path(paths, case_id)
         if case_path is None:
             print(f"case not prepared: {case_id}", file=sys.stderr)
@@ -704,6 +752,10 @@ def cmd_score(args, paths) -> int:
 
 
 def cmd_report(args, paths) -> int:
+    for case_id in args.case:
+        refused = _refuse_unsafe_id(case_id, "case id")
+        if refused is not None:
+            return refused
     case_ids = args.case or sorted(
         p.name.split(".")[0] for p in _iter_case_paths(paths)
     )

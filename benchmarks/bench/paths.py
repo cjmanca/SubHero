@@ -2,11 +2,39 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _scratch_roots: list[Path] = []
 _forbidden_roots: list[Path] = []
 _source_roots: list[Path] = []
+
+SAFE_ID_MAX_LEN = 128
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def is_safe_id(value: str) -> bool:
+    """Strict validator for user-controlled ids used in paths/registry keys.
+
+    Non-empty, at most SAFE_ID_MAX_LEN chars, charset [A-Za-z0-9._-] only (so
+    no '/', '\\', '..', NUL, whitespace, or shell/metacharacters), and no
+    leading '.' (so no '.'/'..' and no hidden files).
+    """
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= SAFE_ID_MAX_LEN
+        and not value.startswith(".")
+        and _SAFE_ID_RE.match(value) is not None
+    )
+
+
+def require_safe_id(value: str, label: str) -> None:
+    if not is_safe_id(value):
+        raise ValueError(
+            f"REFUSED: {label} {value!r} is not a safe id (required: non-empty, "
+            f"<= {SAFE_ID_MAX_LEN} chars, [A-Za-z0-9._-] only, no leading '.' "
+            "or path separators)"
+        )
 
 
 def configure(
