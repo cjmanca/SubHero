@@ -443,6 +443,109 @@ def _provenance_problem(
     return ""
 
 
+def _acceptance_binding_problem(
+    cand_dir: Path,
+    run: dict,
+    case: CaseManifest,
+) -> str:
+    """Return a refusal reason when a b1-va ``acceptance.json`` is not bound to
+    the verified ``run.json`` provenance; the empty string when it is.
+
+    Binding contract (P1-1). ``cmd_score`` loads an acceptance record ONLY for
+    the ``b1-va`` arm, and only when ALL of the following hold:
+
+    * ``run.json`` records ``acceptance_sha256`` equal to the actual
+      ``acceptance.json`` bytes. ``cmd_run`` writes ``acceptance.json`` FIRST,
+      hashes those exact bytes into ``run.json.acceptance_sha256``, and only
+      then writes ``run.json``; the file, its hash, and the run provenance are
+      therefore mutually consistent for a genuine run.
+    * ``acceptance.case_id == case.case_id`` — a cross-case acceptance copy is
+      refused (case_id is checked, not ignored).
+    * ``acceptance.candidate_id == "b1-va"`` — the acceptance is attributed to
+      the validating arm, not to a base/proposal-only arm.
+    * ``acceptance.validated_candidate_id == run.validated_candidate_id`` —
+      the base arm whose ``proposal.json`` copy the acceptance validated. The
+      proposal copy is already bound to ``run.proposal_sha256`` by
+      ``_provenance_problem``; the base identity is bound through these
+      EXISTING ``AcceptanceRecord`` fields (``candidate_id`` /
+      ``validated_candidate_id`` from ``manifests.py``), not a new field.
+
+    Missing, legacy (no recorded hash), unreadable, tampered, replaced, or
+    planted acceptance artifacts return a non-empty reason so ``cmd_score``
+    takes the rc-6 refusal path (message + delete any stale ``score.json``); a
+    hand-written ``success``/original-times file can never drive final-timeline
+    scoring, and the verified current fingerprint is embedded in a real score.
+    """
+    label = f"{case.case_id}/b1-va"
+    rerun = f"re-run it: run --case {case.case_id} --candidate b1-va"
+    from .manifests import AcceptanceRecord
+
+    acc_path = cand_dir / "acceptance.json"
+    if not acc_path.is_file():
+        return (
+            f"UNVERIFIED: {label} run.json validated a base arm but "
+            f"acceptance.json is missing; {rerun}"
+        )
+    recorded = run.get("acceptance_sha256")
+    if not recorded:
+        return (
+            f"UNVERIFIED: {label} run.json (schema_version "
+            f"{run.get('schema_version', '?')}) records no acceptance_sha256; "
+            f"acceptance bytes are unbound; {rerun}"
+        )
+    actual = sha256_file(acc_path)
+    if actual != recorded:
+        return (
+            f"STALE: {label} acceptance.json bytes no longer match run.json "
+            f"acceptance_sha256 (recorded {recorded[:16]}… vs actual {actual[:16]}…; "
+            f"tampered, replaced, or planted?); {rerun}"
+        )
+    try:
+        acceptance = AcceptanceRecord(**read_json(acc_path))
+    except (OSError, ValueError) as exc:
+        return f"UNVERIFIED: {label} acceptance.json is unreadable ({exc}); {rerun}"
+    if acceptance.case_id != case.case_id:
+        return (
+            f"UNVERIFIED: {label} acceptance.json case_id "
+            f"{acceptance.case_id!r} does not match this case {case.case_id!r} "
+            f"(cross-case acceptance planted); {rerun}"
+        )
+    if acceptance.candidate_id != "b1-va":
+        return (
+            f"UNVERIFIED: {label} acceptance.json candidate_id "
+            f"{acceptance.candidate_id!r} is not b1-va; {rerun}"
+        )
+    validated = run.get("validated_candidate_id")
+    if not validated:
+        return (
+            f"UNVERIFIED: {label} run.json records no validated_candidate_id; "
+            f"the acceptance base arm is unbound; {rerun}"
+        )
+    if acceptance.validated_candidate_id != validated:
+        return (
+            f"UNVERIFIED: {label} acceptance.json validated_candidate_id "
+            f"{acceptance.validated_candidate_id!r} != run.json "
+            f"{validated!r}; {rerun}"
+        )
+    return ""
+
+
+def _delete_stale_score(cand_dir: Path, label: str, reason: str) -> None:
+    """Delete a candidate's ``score.json`` when it is skipped/refused (P1-2).
+
+    Any number left on disk from an EARLIER case generation is untrustworthy:
+    the report binding will drop it, and leaving it invites a stale row. Report
+    the removal on stderr so a skip/refusal is never silent.
+    """
+    stale = cand_dir / "score.json"
+    if stale.exists():
+        stale.unlink()
+        print(
+            f"deleted stale score.json for {label} ({reason})",
+            file=sys.stderr,
+        )
+
+
 def cmd_source_add(args, paths) -> int:
     refused = _refuse_unsafe_id(args.source_id, "source id")
     if refused is not None:
@@ -549,11 +652,28 @@ def cmd_source_add(args, paths) -> int:
             subtitle_languages[track_id] = sel["language"]
     # A prepared case records a sidecar track by its file stem (corrupt.py sets
     # track_id = source_track_path.stem), so alias each sidecar hint by stem too
-    # for the run to look the identity up by the case's persisted track_id.
+    # for the run to look the identity up by the case's persisted track_id. The
+    # alias exists ONLY to bridge that stem-based track_id for the single-sidecar
+    # case (the common, working flow). When TWO sidecar tracks share a stem
+    # (e.g. `ep.ass` = eng and `stemB/ep.ass` = kor), the stem is ambiguous: a
+    # stem-keyed language would leak one track's identity onto the other (P2-1),
+    # so on a stem COLLISION the alias is NOT stored and the registry keeps only
+    # the track-id keys. `cmd_run` resolves the target identity via
+    # `subtitle_languages.get(case.track_id)`: for a collided stem that lookup
+    # returns nothing, giving the identity-unknown abstain path (never a
+    # wrong-identity lexical reject).
+    from collections import Counter
+
+    sidecar_stem_counts = Counter(
+        Path(target.removeprefix("sidecar:")).stem
+        for target in subtitles.values()
+        if target.startswith("sidecar:")
+    )
     for track_id, target in subtitles.items():
         if target.startswith("sidecar:") and track_id in subtitle_languages:
             stem = Path(target.removeprefix("sidecar:")).stem
-            subtitle_languages.setdefault(stem, subtitle_languages[track_id])
+            if sidecar_stem_counts[stem] == 1:
+                subtitle_languages.setdefault(stem, subtitle_languages[track_id])
     duration = None
     fmt = streams.get("format", {})
     if fmt.get("duration"):
@@ -945,6 +1065,12 @@ def cmd_run(args, paths) -> int:
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())
+            # P1-1: bind acceptance.json to this run. The acceptance file is
+            # written FIRST, then its hash is recorded here so cmd_score can
+            # require the on-disk acceptance bytes to match run.json
+            # (acceptance_sha256) and to validate its identity fields; a
+            # hand-written/planted acceptance can no longer drive scoring.
+            acceptance_sha256 = sha256_file(va_dir / "acceptance.json")
             va_proposal_path = va_dir / "proposal.json"
             write_json(va_proposal_path, base_proposal.to_json())
             source_media = Path(source["media_path"])
@@ -966,6 +1092,7 @@ def cmd_run(args, paths) -> int:
                         case, source, "b1-va", {}
                     ),
                     "proposal_sha256": sha256_file(va_proposal_path),
+                    "acceptance_sha256": acceptance_sha256,
                     "validated_candidate_id": base,
                     "base_proposal_sha256": sha256_file(base_proposal_path),
                     # Provenance: which source audio stream the decoded
@@ -1019,31 +1146,57 @@ def cmd_score(args, paths) -> int:
             provenance = _provenance_problem(d, cand, case, source)
             if provenance:
                 print(f"REFUSED ({case_id}/{cand}): {provenance}", file=sys.stderr)
-                stale_score = d / "score.json"
-                if stale_score.exists():
-                    stale_score.unlink()
-                    print(
-                        f"deleted stale score.json for {case_id}/{cand} "
-                        "(not recomputed from verified data)",
-                        file=sys.stderr,
-                    )
+                _delete_stale_score(
+                    d, f"{case_id}/{cand}", "not recomputed from verified data"
+                )
                 rc = 6
                 continue
+            # The provenance gate just verified run.json binds to THIS case
+            # generation, so recompute the verified current fingerprint (the same
+            # tool_versions run.json recorded) and embed it in the score row so
+            # the report can bind the number back to a matching run (P1-2).
+            run = read_json(d / "run.json")
+            current_fp = compute_input_fingerprint(
+                case, source, cand, run.get("tool_versions", {})
+            )
             proposal = ProposalRecord(**read_json(prop_path))
             proposal.candidate_id = cand
             acceptance = None
-            acc_path = d / "acceptance.json"
-            if acc_path.exists():
+            if cand == "b1-va":
+                # P1-1: acceptance is trusted ONLY for b1-va, and only when it
+                # is bound to the verified run.json (recorded hash + identity).
                 from .manifests import AcceptanceRecord
 
-                acceptance = AcceptanceRecord(**read_json(acc_path))
+                acc_problem = _acceptance_binding_problem(d, run, case)
+                if acc_problem:
+                    print(
+                        f"REFUSED ({case_id}/{cand}): {acc_problem}",
+                        file=sys.stderr,
+                    )
+                    _delete_stale_score(
+                        d, f"{case_id}/{cand}", "acceptance.json not bound to run.json"
+                    )
+                    rc = 6
+                    continue
+                acceptance = AcceptanceRecord(**read_json(d / "acceptance.json"))
+            # Non-b1-va arms never accept: any acceptance.json present in their
+            # directory is ignored (treated as absent), so a planted file cannot
+            # steer proposal-only final-timeline scoring (P1-1).
             if (
                 proposal.mapping_status not in ("noop", "1:1-order-preserving")
                 and cand != "b1-va"
             ):
+                # P1-2: a non-scoreable arm must not leave a prior generation's
+                # score.json behind; delete it so the skip is never silent.
+                _delete_stale_score(
+                    d,
+                    f"{case_id}/{cand}",
+                    f"non-scoreable mapping_status {proposal.mapping_status}",
+                )
                 continue
             score = score_case(case, proposal, corrupted_times, acceptance, tol)
             score["candidate_id"] = cand
+            score["input_fingerprint"] = current_fp
             write_json(d / "score.json", score)
             print(
                 f"scored {case_id}/{cand}: median final onset err {score['timing_errors_final_us']['median_abs_us']} us"

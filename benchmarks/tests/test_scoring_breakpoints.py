@@ -621,6 +621,12 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
         "",
     )
     v2 = score_case(case, perfect, corrupted, None, TOL)
+    # The report now BINDS every rendered score row to a fingerprint-matching
+    # run.json in the same case/candidate (P1-2). This direct-call test pins the
+    # v2/v1 rendering contract, so it supplies the matching provenance the CLI
+    # would have embedded; a score with no such run is dropped (see
+    # test_provenance_acceptance for the dropped-unbound regression).
+    v2["input_fingerprint"] = "a" * 64
     v1 = {
         "schema_version": 1,
         "case_id": "legacy-case",
@@ -658,8 +664,18 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
         },
         "offset_recovery": None,
     }
-    text = build_report(["hand-s03", "legacy-case"], [], [v2, v1], {})
+    runs_hand = [
+        {
+            "case_id": "hand-s03",
+            "candidate_id": "b1-ideal",
+            "schema_version": 2,
+            "status": "1:1-order-preserving",
+            "input_fingerprint": "a" * 64,
+        }
+    ]
+    text = build_report(["hand-s03", "legacy-case"], runs_hand, [v2, v1], {})
     assert "b1-ideal" in text
+    assert "dropped unbound score rows: 0" in text
     assert "unresolved" in text
     assert (
         "candidate-implied breakpoints 2 (matched 2 of 2 true, false-positive 0" in text
@@ -695,7 +711,17 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
         None,
         TOL,
     )
-    text = build_report([s01_case.case_id], [], [v2_s01], {})
+    v2_s01["input_fingerprint"] = "b" * 64
+    runs_s01 = [
+        {
+            "case_id": s01_case.case_id,
+            "candidate_id": "b1-px-fg",
+            "schema_version": 2,
+            "status": "1:1-order-preserving",
+            "input_fingerprint": "b" * 64,
+        }
+    ]
+    text = build_report([s01_case.case_id], runs_s01, [v2_s01], {})
     assert "applied shift -1900 ms" in text
     assert "recovered 1900 ms" in text
     assert "residual 0 ms" in text

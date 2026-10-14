@@ -17,8 +17,34 @@ def build_report(
     scores: list[dict],
     tool_versions: dict[str, str],
 ) -> str:
-    """Render schema_version-2 scores; v1 (residual-domain detection) rows are ignored."""
+    """Render schema_version-2 scores; v1 (residual-domain detection) rows are ignored.
+
+    P1-2 binding: every score row must be bound to a verified run.json in the
+    SAME case/candidate whose recorded ``input_fingerprint`` EQUALS the
+    fingerprint embedded in the score. A schema-2 score with no matching
+    fingerprint run (no run.json, a legacy run.json without a fingerprint, a
+    fingerprint from a different case generation, or a hand-planted number) is
+    DROPPED and counted in ``dropped unbound score rows: N`` so the report never
+    renders an unbound number. Legacy rows/runs are still never silently
+    trusted, and legacy entries must not crash rendering.
+    """
     scores = [s for s in scores if int(s.get("schema_version", 0)) == 2]
+    run_fingerprints: dict[tuple, set] = {}
+    for r in runs:
+        fp = r.get("input_fingerprint")
+        if fp:
+            key = (r.get("case_id"), r.get("candidate_id"))
+            run_fingerprints.setdefault(key, set()).add(fp)
+    bound_scores: list[dict] = []
+    dropped_unbound = 0
+    for s in scores:
+        fp = s.get("input_fingerprint")
+        key = (s.get("case_id"), s.get("candidate_id"))
+        if fp and fp in run_fingerprints.get(key, set()):
+            bound_scores.append(s)
+        else:
+            dropped_unbound += 1
+    scores = bound_scores
     lines: list[str] = []
     lines.append("# Benchmark comparison report")
     lines.append("")
@@ -27,6 +53,11 @@ def build_report(
     )
     lines.append(
         "about real-speech synchronization, and it is not a production threshold. See denominators."
+    )
+    lines.append("")
+    lines.append(
+        f"dropped unbound score rows: {dropped_unbound} (schema-2 scores with no "
+        "fingerprint-matching run.json in the same case/candidate are never rendered)"
     )
     lines.append("")
     if tool_versions:
