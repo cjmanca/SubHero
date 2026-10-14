@@ -184,15 +184,25 @@ def test_relative_sidecar_registration_from_repo_root_matches_documented_flow(
     registry = root / "cases" / "sources.json"
     assert registry.is_file()
     record = json.loads(registry.read_text(encoding="utf-8"))["sources"]["Fx00"]
-    # specs stored exactly as given
-    assert record["subtitle_specs"]["episode"] == (
-        "sidecar:benchmarks/fixtures/Fx00/episode.ass"
+
+    # F08: relative input is resolved against the registration CWD and stored as a
+    # canonical absolute path (the same resolved path the policy evaluated)
+    def stored(rel: str) -> str:
+        return str((REPO_ROOT / rel).resolve())
+
+    assert (
+        record["subtitle_specs"]["episode"]
+        == f"sidecar:{stored('benchmarks/fixtures/Fx00/episode.ass')}"
     )
-    assert record["subtitle_specs"]["signs"] == (
-        "sidecar:benchmarks/fixtures/Fx00/signs.ass"
+    assert (
+        record["subtitle_specs"]["signs"]
+        == f"sidecar:{stored('benchmarks/fixtures/Fx00/signs.ass')}"
     )
-    assert record["gold_classification"]["episode"] == (
+    assert record["gold_classification"]["episode"] == stored(
         "benchmarks/fixtures/Fx00/gold_episode.json"
+    )
+    assert record["gold_classification"]["signs"] == stored(
+        "benchmarks/fixtures/Fx00/gold_signs.json"
     )
     # media path resolved absolutely as before
     assert Path(record["media_path"]).is_absolute()
@@ -201,7 +211,10 @@ def test_relative_sidecar_registration_from_repo_root_matches_documented_flow(
     assert before == after
 
 
-def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
+def test_relative_paths_resolve_at_registration_and_stay_stable_across_cwd(
+    tmp_path, monkeypatch, capsys
+):
+    """F08: registration pins relative sidecar/gold paths; later CWDs cannot move them."""
     root = tmp_path / "benchroot2"
     monkeypatch.chdir(BENCH_ROOT)
     # relative from benchmarks CWD -> allowed fixtures home (synthetic rights only;
@@ -218,13 +231,23 @@ def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
             "FXREL",
             "--subtitle",
             "main=sidecar:fixtures/Fx00/episode.ass",
+            "--gold",
+            "main=fixtures/Fx00/gold_episode.json",
             "--rights",
             "redistributable-synthetic-fixture",
         ]
     )
     assert rc == 0
-    assert (root / "cases" / "sources.json").is_file()
+    registry_path = root / "cases" / "sources.json"
+    assert registry_path.is_file()
+    record = json.loads(registry_path.read_text(encoding="utf-8"))["sources"]["FXREL"]
+    checked_sidecar = (BENCH_ROOT / "fixtures" / "Fx00" / "episode.ass").resolve()
+    checked_gold = (BENCH_ROOT / "fixtures" / "Fx00" / "gold_episode.json").resolve()
+    assert record["subtitle_specs"]["main"] == f"sidecar:{checked_sidecar}"
+    assert record["gold_classification"]["main"] == str(checked_gold)
+    assert Path(record["media_path"]).is_absolute()
     capsys.readouterr()
+
     # F05: a private-local claim against the tracked fixtures home is refused
     rc = cli.main(
         [
@@ -245,7 +268,7 @@ def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "REFUSED (private data policy)" in captured.err
-    registry = (root / "cases" / "sources.json").read_text(encoding="utf-8")
+    registry = registry_path.read_text(encoding="utf-8")
     assert "FXPVT" not in registry
     # relative escaping: ../evil.ass from benchmarks CWD = benchmarks/evil.ass -> refused
     rc = cli.main(
@@ -267,9 +290,53 @@ def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert rc == 2
     assert "REFUSED (private data policy)" in captured.err
-    registry = (root / "cases" / "sources.json").read_text(encoding="utf-8")
+    registry = registry_path.read_text(encoding="utf-8")
     assert "FXEVIL" not in registry
     assert not (BENCH_ROOT / "evil.ass").exists()
+
+    # Execution from a DIFFERENT CWD resolves the identical files (the old
+    # CWD-relative storage would have looked for fixtures/Fx00/episode.ass under
+    # this working directory, which does not exist).
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert not (elsewhere / "fixtures" / "Fx00" / "episode.ass").exists()
+    sources = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert cli._verify_sources(cli._paths(root), "FXREL", sources) == []
+    rc = cli.main(
+        [
+            "--root",
+            str(root),
+            "case",
+            "prepare",
+            "--source-id",
+            "FXREL",
+            "--track-id",
+            "main",
+            "--scenario",
+            "S00",
+            "--seed",
+            "11",
+            "--case-id",
+            "FXREL-S00",
+        ]
+    )
+    assert rc == 0
+    manifest = json.loads((root / "cases" / "FXREL-S00.case.json").read_text("utf-8"))
+    assert manifest["generated_path"] == "_scratch/FXREL-S00/corrupted.ass"
+    assert (
+        cli.main(
+            ["--root", str(root), "run", "--case", "FXREL-S00", "--candidate", "b1-n"]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            ["--root", str(root), "score", "--case", "FXREL-S00", "--candidate", "b1-n"]
+        )
+        == 0
+    )
+    capsys.readouterr()
 
 
 def test_private_path_policy(tmp_path):

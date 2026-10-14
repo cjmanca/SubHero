@@ -234,11 +234,13 @@ def _resolve_audio_selection(spec: str | None, streams: list[dict]) -> dict | No
 
 def _resolve_user_path(raw: str) -> Path:
     """Canonical resolution for USER-GIVEN relative paths: from the current
-    working directory, exactly as consumers (`Path(spec)` in
-    `cmd_case_prepare`/`_verify_sources`/`prepare_case`) will open them.
-    The private-data policy must evaluate this exact resolved path.
-    Harness-stored manifest paths are root-relative and resolved at run time
-    by `_resolve_under_root`; they are internal and unaffected.
+    working directory. `cmd_source_add` resolves sidecar/gold input with this
+    function **at registration time**, evaluates the private-data policy on the
+    exact result, and persists that absolute path in the Git-ignored local
+    registry (as it already does for ``media_path``), so later invocations from
+    any other working directory open the same files. Harness-stored manifest
+    paths are root-relative and resolved at run time by `_resolve_under_root`;
+    they are internal and unaffected.
     """
     return Path(raw).resolve()
 
@@ -262,8 +264,8 @@ def _private_path_policy(
       declared redistributable synthetic references. A private episode placed in
       the fixtures home is eligible for a normal tracked commit, so it is refused.
 
-    The candidate must be the exact resolved path the consumers will open
-    (CWD-joined for user-given relative paths).
+    The candidate must be the exact resolved path that registration stores and
+    the consumers will open (CWD-joined for user-given relative paths).
     """
     resolved = Path(candidate).resolve()
     if not _under_root(resolved, repo_root):
@@ -458,7 +460,7 @@ def cmd_source_add(args, paths) -> int:
     for spec in args.subtitle or []:
         _, _, target = spec.partition("=")
         if target.startswith("sidecar:"):
-            # Same resolution the consumers use: CWD-joined, then resolved.
+            # Same resolution registration persists (CWD-joined, then resolved).
             policy_targets.append(_resolve_user_path(target.removeprefix("sidecar:")))
     for gold_spec in args.gold or []:
         _, _, target = gold_spec.partition("=")
@@ -499,8 +501,11 @@ def cmd_source_add(args, paths) -> int:
     for spec in args.subtitle or []:
         track_id, _, target = spec.partition("=")
         if target.startswith("sidecar:"):
-            subtitles[track_id] = target
-            hashes[track_id] = sha256_file(Path(target.removeprefix("sidecar:")))
+            # F08: persist the canonical absolute path, i.e. the exact path the
+            # private-data policy evaluated, so later CWDs cannot move the target.
+            resolved_sidecar = _resolve_user_path(target.removeprefix("sidecar:"))
+            subtitles[track_id] = f"sidecar:{resolved_sidecar}"
+            hashes[track_id] = sha256_file(resolved_sidecar)
         elif target.startswith("mkv:"):
             remainder = target.removeprefix("mkv:")
             if remainder.isdigit():
@@ -553,6 +558,12 @@ def cmd_source_add(args, paths) -> int:
     fmt = streams.get("format", {})
     if fmt.get("duration"):
         duration = int(float(fmt["duration"]) * 1_000_000)
+    # F08: gold classification targets are stored as the same canonical absolute
+    # paths the policy evaluated, parsed exactly like the policy loop above.
+    gold_targets = {
+        track_id: str(_resolve_user_path(target))
+        for track_id, _, target in (g.partition("=") for g in args.gold or [])
+    }
     sources["sources"][args.source_id] = {
         "source_id": args.source_id,
         "media_path": str(media),
@@ -573,9 +584,7 @@ def cmd_source_add(args, paths) -> int:
         "audio_spec": audio_spec,
         "subtitle_selected": subtitle_selected,
         "subtitle_languages": subtitle_languages,
-        "gold_classification": dict(g.split("=", 1) for g in args.gold)
-        if args.gold
-        else {},
+        "gold_classification": gold_targets,
         "rights_status": args.rights,
         "notes": args.notes,
     }

@@ -200,19 +200,27 @@ Private-data home and CLI protection (enforced, not just policy):
   annotations/gold files, private case manifests, logs, model outputs, results — is
   git-ignored and **never committed**; only `benchmarks/private/README.md` is committed.
 - `source add` **refuses** to register any media, sidecar subtitle, or gold annotation
-  path that resolves inside the repository outside `benchmarks/private/` and the
-  synthetic `benchmarks/fixtures/` home (exit 2, nothing registered, no partial writes).
+  path that resolves inside the repository outside the homes allowed for its declared
+  rights (exit 2, nothing registered, no partial writes): `private-local` registrations
+  may target only `benchmarks/private/`-type homes; the tracked `benchmarks/fixtures/`
+  home is reserved for declared `redistributable-synthetic-fixture` references.
   Paths outside the repository (e.g. read-only mounts) are allowed and recommended.
+  A `--root` inside the repository must be the canonical benchmarks root (covered by
+  the committed ignore rules) or a directory proven Git-ignored via `git check-ignore`
+  (fail-closed refusal otherwise, so manifests/scratch/results under a custom in-repo
+  root never become committable); out-of-repo roots are unrestricted.
   Path semantics (single coherent rule): **user-given relative paths** (media `--path`,
-  `sidecar:` targets, gold targets) are resolved from the **current working directory** —
-  the policy check evaluates the exact resolved path the consumers will open, so the
-  documented registration works from the repo root and relative specs are stored
-  unchanged; harness-stored manifest paths (`generated_path`,
-  `gold_classification_path` in case manifests) are root-relative and resolved
-  against the benchmarks root at run time. The allowed in-repo homes
-  (`benchmarks/private/`, `benchmarks/fixtures/`) are anchored to the repository
-  layout, so a temporary `--root` registry can legitimately reference repository
-  fixtures while in-repo escapes (`benchmarks/cases/…`, repo roots) stay refused.
+  `sidecar:` targets, gold targets) are resolved from the **current working directory
+  at registration**, the policy check evaluates that exact resolved path, and the
+  canonical **absolute** result is persisted in the Git-ignored local registry (as for
+  `media_path`), so later `case prepare`/`run`/`score` invocations from any other
+  working directory open the same files. Harness-stored manifest paths
+  (`generated_path`, `gold_classification_path` in case manifests) stay root-relative
+  redacted identifiers and are resolved against the benchmarks root at run time. The
+  allowed in-repo homes (`benchmarks/private/`, `benchmarks/fixtures/`) are anchored
+  to the repository layout, so a temporary out-of-repo `--root` registry can
+  legitimately reference repository fixtures while in-repo escapes
+  (`benchmarks/cases/…`, repo roots) stay refused.
 - Case manifests are routed by rights: only `redistributable-synthetic-fixture` sources
   write `.case.json` manifests into the committed `benchmarks/cases/` directory; all
   other sources (e.g. `private-local`) write under `benchmarks/private/cases/`.
