@@ -1,0 +1,22 @@
+{
+  "audio_sample_rate_hz": 8000,
+  "audio_samples": 3596000,
+  "event_counts": {
+    "dialogue": 36,
+    "intentional_overlaps": 3,
+    "karaoke": 6,
+    "sdh": 4,
+    "signs": 11,
+    "signs_only_track": 12
+  },
+  "files": {
+    "audio_wav": "fx01_audio.wav",
+    "dialogue_srt": "fx01_main.srt",
+    "main_ass": "fx01_main.ass",
+    "signs_only_ass": "fx01_signs.ass"
+  },
+  "fixture_id": "FX01",
+  "rights": "redistributable: generated in-repo synthetic content (no third-party media)",
+  "schema_version": 1,
+  "synthetic_audio_note": "fx01_audio.wav contains decaying 440 Hz tone bursts centred on dialogue cue midpoints. It is a harness plumbing check for end-to-end execution only; it is not speech and does not validate actual speech synchronization accuracy."
+}

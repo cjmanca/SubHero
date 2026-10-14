@@ -1,0 +1,19 @@
+{
+  "audio": {
+    "content": "tone bursts in dialogue windows, silence elsewhere",
+    "sample_rate": 8000
+  },
+  "contains_real_speech": false,
+  "duration_s": 60,
+  "files": {
+    "episode.ass": "553a5ac44699247211091bc26cf875699164ac92b44c776d722108cd795c127c",
+    "gold_episode.json": "4eca507ee9d706347c7e1195a975a2dfba0138332d292a9eb59f25b092ca6065",
+    "gold_signs.json": "a7db132ca36038d25efed92fd08e207304ec60a011ac5b887993249fff42d06d",
+    "reference.wav": "8aed58319244230e5bf7364385c8d84f22fa45ce5449a13a8de7d34335d7d2f4",
+    "signs.ass": "b94f1729da760870c4c70d6c2558b8a1f27c707650c1a88d827d66c483dceedd"
+  },
+  "fixture_id": "Fx00",
+  "purpose": "pipeline plumbing smoke tests only; no speech-synchronization validity",
+  "schema_version": 1,
+  "synthetic": true
+}

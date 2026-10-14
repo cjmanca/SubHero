@@ -1,0 +1,99 @@
+{
+  "case_id": "Fx00-SGN01",
+  "expected_inverse": {
+    "cue_regions": {
+      "e0000": 0,
+      "e0001": 0,
+      "e0002": 0,
+      "e0003": 0,
+      "e0004": 0
+    },
+    "cue_shifts": [],
+    "segments": [
+      {
+        "end_us": null,
+        "offset_us": -1490000,
+        "scale": [
+          1,
+          1
+        ],
+        "start_us": 1490000
+      }
+    ]
+  },
+  "fmt": "ass",
+  "generated_path": "C:\\Documents\\projects\\SubHero\\benchmarks\\_scratch\\Fx00-SGN01\\corrupted.ass",
+  "generated_subtitle_sha256": "373e9a9d1278d940b2a0fc598218d101e17235ae2aceec1f5baf884cfbca5573",
+  "gold_classification_path": "benchmarks\\fixtures\\Fx00\\gold_signs.json",
+  "grid_us": 10000,
+  "injected_cue_deltas": {
+    "e0000": [
+      1490000,
+      1490000
+    ],
+    "e0001": [
+      1490000,
+      1490000
+    ],
+    "e0002": [
+      1490000,
+      1490000
+    ],
+    "e0003": [
+      1490000,
+      1490000
+    ],
+    "e0004": [
+      1490000,
+      1490000
+    ]
+  },
+  "notes": "",
+  "original_subtitle_sha256": "b94f1729da760870c4c70d6c2558b8a1f27c707650c1a88d827d66c483dceedd",
+  "original_times_us": {
+    "e0000": [
+      5000000,
+      9000000
+    ],
+    "e0001": [
+      16000000,
+      20000000
+    ],
+    "e0002": [
+      30000000,
+      34000000
+    ],
+    "e0003": [
+      43000000,
+      46000000
+    ],
+    "e0004": [
+      56000000,
+      59500000
+    ]
+  },
+  "params": {
+    "offset_us": 1490000,
+    "scenario": "S01"
+  },
+  "scenario": "S01",
+  "schema_version": 1,
+  "seed": 18,
+  "source_id": "Fx00",
+  "track_id": "signs",
+  "transform": {
+    "cue_shifts": [],
+    "segments": [
+      {
+        "end_us": null,
+        "offset_us": 1490000,
+        "scale": [
+          1,
+          1
+        ],
+        "start_us": 0
+      }
+    ]
+  },
+  "true_breakpoints_us": []
+}

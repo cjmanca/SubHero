@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Benchmark generated artifacts and local private paths (never commit media, transcripts, local paths)
+benchmarks/scratch/
+benchmarks/results/
+benchmarks/local_config.json
+benchmarks/cases/sources.json
+benchmarks/_scratch/
+benchmarks/results/
