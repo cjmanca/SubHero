@@ -19,7 +19,7 @@ from .adapters import (
     ToolConfig,
     run_candidate,
 )
-from .asr import get_transcriber
+from .asr import get_semantic_verifier, get_transcriber
 from .corrupt import prepare_case
 from .manifests import CaseManifest, ProposalRecord, read_json, write_json
 from .media import extract_audio, extract_subtitle_stream, ffprobe_streams, sha256_file
@@ -616,7 +616,11 @@ def cmd_run(args, paths) -> int:
                 rc = 2
                 continue
             base_proposal = ProposalRecord(**read_json(base_proposal_path))
+            # Transcription (BENCH_ASR_*) and semantic verification
+            # (BENCH_SEM_VERIFY_*) are independently configured boundaries;
+            # only production getters are wired here, never test mocks.
             transcriber = get_transcriber()
+            verifier = get_semantic_verifier()
             acc = validate_proposal(
                 case,
                 base_proposal,
@@ -629,6 +633,7 @@ def cmd_run(args, paths) -> int:
                 args.language,
                 args.seed,
                 audio_stream=audio_stream,
+                verifier=verifier,
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())

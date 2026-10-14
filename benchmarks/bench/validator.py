@@ -6,6 +6,13 @@ the subtitle text and the specific spoken utterance: speech activity at a
 timestamp is insufficient. When evidence is insufficient the region is
 rejected/abstained and original timing is retained. Ground-truth
 correspondence labels are never fed to the validator.
+
+Cross-language verdicts (P1 fix): a Japanese/Chinese audio transcript against
+an ENGLISH subtitle is a translation, so lexical overlap is ~0 — lexical
+comparison is NEITHER accept-support NOR reject evidence across languages.
+Same-script pairs keep the lexical Dice decision; cross-script pairs are
+decided only by an explicitly configured semantic verifier
+(`BENCH_SEM_VERIFY_*`, translation-tolerant), and abstain without one.
 """
 
 from __future__ import annotations
@@ -21,6 +28,9 @@ from .media import extract_audio_window
 PAD_US = 1_500_000
 MIN_MATCH_RATIO = 0.45
 MIN_CONFIDENCE = -0.5
+CJK_RANGE_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
+LATIN_RANGE_RE = re.compile(r"[A-Za-z]")
+SCRIPT_MAJORITY = 0.5
 
 
 def normalize_text(text: str) -> str:
@@ -34,6 +44,31 @@ def _dice(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return 2 * len(a & b) / (len(a) + len(b))
+
+
+def script_profile(text: str) -> tuple[float, float]:
+    """(CJK kana/ideograph ratio, Latin ratio) over alphabetic characters."""
+    normalized = normalize_text(text)
+    letters = [ch for ch in normalized if ch.isalpha()]
+    if not letters:
+        return (0.0, 0.0)
+    cjk = sum(1 for ch in letters if CJK_RANGE_RE.match(ch))
+    latin = sum(1 for ch in letters if LATIN_RANGE_RE.match(ch))
+    return (cjk / len(letters), latin / len(letters))
+
+
+def is_cross_language(subtitle_text: str, transcript_text: str) -> bool:
+    """True when one side is majority-Latin and the other majority-CJK.
+
+    Heuristic: a script is "majority" when its ratio of alphabetic characters
+    exceeds SCRIPT_MAJORITY (0.5). Cross-language means the lexical score is
+    meaningless as agreement evidence.
+    """
+    s_cjk, s_latin = script_profile(subtitle_text)
+    t_cjk, t_latin = script_profile(transcript_text)
+    return (s_latin > SCRIPT_MAJORITY and t_cjk > SCRIPT_MAJORITY) or (
+        s_cjk > SCRIPT_MAJORITY and t_latin > SCRIPT_MAJORITY
+    )
 
 
 def semantic_match(subtitle_text: str, transcript_text: str) -> float:
@@ -117,11 +152,15 @@ def validate_proposal(
     language: str,
     seed: int,
     audio_stream: str | None = None,
+    verifier=None,
 ) -> AcceptanceRecord:
     """Validate a base arm's proposals with targeted ASR windows.
 
     ``audio_stream`` is the ffmpeg map string (e.g. ``0:a:1``) for the source's
     registered audio track; ``None`` keeps legacy behavior (``0:a:0``).
+    ``verifier`` is an optional semantic verifier (translation-tolerant) used
+    ONLY for cross-language samples; transcription and verification are
+    independently configured boundaries.
     """
     if transcriber is None:
         return AcceptanceRecord(
@@ -162,6 +201,9 @@ def validate_proposal(
     asr_seconds = 0.0
     asr_calls = 0
     verdicts: dict[int, list[str]] = {}
+    no_verifier_cross_lang = 0
+    verifier_no_verdict = 0
+    mock_verifier_used = False
     for cid in samples:
         start_us, end_us = proposal.proposed_times_us[cid]
         region = cue_region(corrupted_times[cid][0], proposal.regions)
@@ -187,15 +229,46 @@ def validate_proposal(
             continue
         asr_seconds += result.seconds
         asr_calls += 1
-        ratio = semantic_match(cue_text.get(cid, ""), result.text)
+        subtitle_text = cue_text.get(cid, "")
+        ratio = semantic_match(subtitle_text, result.text)
         if result.mock:
             verdicts.setdefault(region, []).append("abstain")
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                 f"{cid}: mock transcriber used; verdict forced to abstain\n"
             )
+        elif is_cross_language(subtitle_text, result.text):
+            # Lexical score is never accept-support and never reject evidence
+            # across languages; only the semantic verifier boundary decides.
+            if verifier is None:
+                verdicts.setdefault(region, []).append("abstain")
+                no_verifier_cross_lang += 1
+                continue
+            try:
+                sv = verifier.verdict(subtitle_text, result.text, "und", language)
+                asr_seconds += sv.seconds
+            except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
+                verdicts.setdefault(region, []).append("abstain")
+                verifier_no_verdict += 1
+                (scratch_dir / "asr_errors.log").open("a", encoding="utf-8").write(
+                    f"{cid}: semantic verifier: {exc}\n"
+                )
+                continue
+            if sv.mock:
+                mock_verifier_used = True
+                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                    f"{cid}: mock semantic verifier used; test-only\n"
+                )
+            if sv.verdict == "match":
+                verdicts.setdefault(region, []).append("accept")
+            elif sv.verdict == "no_match":
+                verdicts.setdefault(region, []).append("reject")
+            else:
+                verdicts.setdefault(region, []).append("abstain")
+                verifier_no_verdict += 1
         elif ratio >= MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
             verdicts.setdefault(region, []).append("accept")
         elif ratio < MIN_MATCH_RATIO and result.confidence >= MIN_CONFIDENCE:
+            # Same-script pair: lexical disagreement IS meaningful evidence.
             verdicts.setdefault(region, []).append("reject")
         else:
             verdicts.setdefault(region, []).append("abstain")
@@ -204,6 +277,7 @@ def validate_proposal(
     rejected_regions: list[dict] = []
     abstained_regions: list[dict] = []
     accepted_times = dict(corrupted_times)
+    mock_tag = "; mock semantic verifier (test-only)" if mock_verifier_used else ""
     for i, region in enumerate(proposal.regions):
         verdict = verdicts.get(i, [])
         if not verdict:
@@ -211,11 +285,11 @@ def validate_proposal(
             continue
         if "reject" in verdict:
             rejected_regions.append(
-                {**region, "reason": "semantic mismatch in samples"}
+                {**region, "reason": "semantic mismatch in samples" + mock_tag}
             )
         elif all(v == "accept" for v in verdict):
             accepted_regions.append(
-                {**region, "reason": "all samples semantically matched"}
+                {**region, "reason": "all samples semantically matched" + mock_tag}
             )
             for cid, (ps, pe) in proposal.proposed_times_us.items():
                 if cue_region(corrupted_times[cid][0], [region]) == 0:
@@ -228,7 +302,41 @@ def validate_proposal(
                 }
             )
 
-    status = "success" if accepted_regions or rejected_regions else "abstain"
+    usable_verdicts = sum(
+        1 for vs in verdicts.values() for v in vs if v in ("accept", "reject")
+    )
+    notes_parts = [
+        "sampling: edges/split-sides/largest-changes/fixed+seeded-random controls",
+        "mock runs never accepted",
+    ]
+    if no_verifier_cross_lang:
+        notes_parts.append(
+            f"{no_verifier_cross_lang} cross-language samples abstained: semantic "
+            "verifier not configured (BENCH_SEM_VERIFY_*); cross-language lexical "
+            "differences are not evidence"
+        )
+    if verifier_no_verdict:
+        notes_parts.append(
+            f"{verifier_no_verdict} cross-language samples: semantic verifier gave "
+            "no usable verdict (unknown/failure); abstained"
+        )
+    if mock_verifier_used:
+        notes_parts.append("mock semantic verifier used (test-only)")
+    no_evidence = (no_verifier_cross_lang + verifier_no_verdict) > 0
+    if (
+        not accepted_regions
+        and not rejected_regions
+        and usable_verdicts == 0
+        and no_evidence
+    ):
+        status = "not_run"
+        notes_parts.insert(
+            0,
+            "semantic verification not run (no usable evidence); original timing "
+            "retained",
+        )
+    else:
+        status = "success" if accepted_regions or rejected_regions else "abstain"
     return AcceptanceRecord(
         case_id=case.case_id,
         candidate_id="b1-va",
@@ -241,5 +349,5 @@ def validate_proposal(
         sample_cue_ids=samples,
         asr_seconds=asr_seconds,
         asr_calls=asr_calls,
-        notes=f"sampling: edges/split-sides/largest-changes/{'fixed+seeded-random controls'}; mock runs never accepted",
+        notes="; ".join(notes_parts),
     )

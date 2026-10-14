@@ -1,10 +1,11 @@
 from pathlib import Path
 
-from bench.asr import MockTranscriber
+from bench.asr import MockSemanticVerifier, MockTranscriber, Transcription
 from bench.corrupt import prepare_case
-from bench.manifests import ProposalRecord
+from bench.manifests import CaseManifest, ProposalRecord
 from bench.subtitles import Track
 from bench.validator import (
+    is_cross_language,
     normalize_text,
     plan_samples,
     semantic_match,
@@ -97,3 +98,142 @@ def test_mock_transcriber_never_auto_accepts(fixture_dir, tmp_path):
         r["reason"].startswith(("no samples", "mixed", "insufficient"))
         for r in acc.abstained_regions
     )
+
+
+class _FakeASR:
+    """Non-mock test transcriber with canned per-cue texts and confidence."""
+
+    def __init__(self, texts: dict[str, str], confidence: float = 1.0):
+        self.texts = dict(texts)
+        self.confidence = confidence
+
+    def transcribe_window(self, wav_path, language, key=None):
+        return Transcription(
+            text=self.texts[key],
+            confidence=self.confidence,
+            seconds=0.0,
+            model="fake",
+            mock=False,
+        )
+
+
+def _hand_case(cue_text: dict[str, str]):
+    original = {
+        cid: (1_000_000 + i * 10_000_000, 2_000_000 + i * 10_000_000)
+        for i, cid in enumerate(sorted(cue_text))
+    }
+    corrupted = {
+        cid: (s + 5_000_000, e + 5_000_000) for cid, (s, e) in original.items()
+    }
+    case = CaseManifest(
+        case_id="sem-lex",
+        source_id="SEM",
+        scenario="S01",
+        seed=1,
+        track_id="episode",
+        fmt="ass",
+        grid_us=10_000,
+        params={"scenario": "S01", "offset_us": 5_000_000},
+        transform={},
+        expected_inverse={},
+        injected_cue_deltas={cid: (5_000_000, 5_000_000) for cid in cue_text},
+        original_times_us=original,
+        true_breakpoints_us=[],
+        original_subtitle_sha256="0" * 64,
+        generated_subtitle_sha256="0" * 64,
+        generated_path="gen.ass",
+    )
+    proposal = ProposalRecord(
+        "sem-lex",
+        "b1-px-fg",
+        "1:1-order-preserving",
+        [{"start_us": 0, "end_us": None, "offset_us": -5_000_000}],
+        dict(original),
+        [],
+        "",
+    )
+    return case, proposal, corrupted
+
+
+def _stub_windows(monkeypatch):
+    monkeypatch.setattr("bench.validator.extract_audio_window", lambda *a, **k: 0.1)
+
+
+def test_same_language_lexical_accept_preserved(tmp_path, monkeypatch):
+    _stub_windows(monkeypatch)
+    cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
+    case, proposal, corrupted = _hand_case(cue_text)
+    asr = _FakeASR({cid: "the door is open" for cid in cue_text})
+    acc = validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run-lex-accept",
+        asr,
+        "en",
+        1,
+        verifier=None,
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.accepted_times_us == proposal.proposed_times_us
+
+
+def test_same_language_lexical_reject_preserved(tmp_path, monkeypatch):
+    _stub_windows(monkeypatch)
+    cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
+    case, proposal, corrupted = _hand_case(cue_text)
+    asr = _FakeASR({cid: "lamps hum on the table" for cid in cue_text})
+    acc = validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run-lex-reject",
+        asr,
+        "en",
+        1,
+        verifier=None,
+    )
+    assert acc.status == "success"
+    assert len(acc.rejected_regions) == 1
+    assert acc.accepted_times_us == corrupted
+
+
+def test_cross_language_pairing_detection(tmp_path, monkeypatch):
+    _stub_windows(monkeypatch)
+    cue_text = {
+        "e0000": "I will protect this city.",
+        "e0001": "I will protect this city.",
+    }
+    case, proposal, corrupted = _hand_case(cue_text)
+    assert is_cross_language("I will protect this city.", "この街はわたしが守る")
+    assert not is_cross_language("the door is open", "the door is wide open")
+    asr = _FakeASR({cid: "この街はわたしが守る" for cid in cue_text})
+    # Cross-language pairs are NOT lexically rejected; verifier decides.
+    lexical = semantic_match(cue_text["e0000"], "この街はわたしが守る")
+    assert lexical < 0.45  # old rule would have false-rejected
+    verifier = MockSemanticVerifier({cue_text["e0000"]: "match"})
+    acc = validate_proposal(
+        case,
+        proposal,
+        "b1-px-fg",
+        corrupted,
+        cue_text,
+        Path("fake.wav"),
+        tmp_path / "run-cross",
+        asr,
+        "ja",
+        1,
+        verifier=verifier,
+    )
+    assert acc.status == "success"
+    assert acc.rejected_regions == []
+    assert len(acc.accepted_regions) == 1
+    assert "mock semantic verifier (test-only)" in acc.accepted_regions[0]["reason"]
+    assert "mock semantic verifier used (test-only)" in acc.notes

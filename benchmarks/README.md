@@ -110,7 +110,7 @@ spec is **refused**: ffmpeg `-map 0:s:<n>` counts subtitle streams while
 | `b1-al` | ALASS | positional CLI; `unsupported` when binary absent |
 | `b1-px-fg` / `b1-px-fp` | dialogue-only proxy + ffsubsync | **heuristic-only anchor classification** (karaoke/music/style/brackets); gold cue labels are never supplied to these arms; cue-ID map recorded; anchorless tracks abstain |
 | `b1-pxo-fg` / `b1-pxo-fp` | **Oracle-assisted DIAGNOSTIC**: dialogue proxy using **GOLD cue labels** + ffsubsync | upper-bound reference only: anchor selection comes from the benchmark's own gold annotations; every proposal/run record carries an explicit `oracle-assisted diagnostic arm` marker; **excluded from `--all`** and from default candidates; select explicitly (`--candidate b1-pxo-fg`) |
-| `b1-va` | targeted-ASR validation | validates a base arm's proposals; `not_run` without a configured local endpoint |
+| `b1-va` | targeted-ASR validation | validates a base arm's proposals; `not_run` without a configured local ASR endpoint (and cross-language samples abstain — `not_run` if that is the only evidence — without a configured `BENCH_SEM_VERIFY_*` semantic verifier; lexical score never decides cross-language pairs) |
 
 ### Gold-label leakage boundary
 
@@ -141,6 +141,32 @@ python benchmarks\run_bench.py run --case Fx00-S01 --all --base-candidate b1-px-
 Without these, `b1-va` records `not_run` with the requirement text. Semantic correspondence
 (subtitle ↔ the specific spoken utterance) is required; speech activity alone never accepts a
 proposal. Mock transcribers exist for tests only and are labeled; they force abstention.
+
+### Translation-assisted semantic verification boundary (`BENCH_SEM_VERIFY_*`)
+
+Lexical comparison is meaningless across languages: Japanese/Chinese audio transcripts
+against English subtitles have ~zero lexical overlap, so a cross-language lexical score is
+**never accept-support and never reject evidence**. Cross-language samples are decided only
+by an explicitly configured, **translation-tolerant semantic verifier** — an
+OpenAI-compatible `/chat/completions` endpoint judged by the env var pair, fully
+**independent** of the ASR env vars:
+
+```
+$env:BENCH_SEM_VERIFY_BASE_URL = "http://127.0.0.1:8100/v1"
+$env:BENCH_SEM_VERIFY_MODEL = "<model>"
+$env:BENCH_SEM_VERIFY_API_KEY = "<optional>"
+```
+
+Subtitles/transcript text leave the machine only to that endpoint; confirm it is local and
+permitted before configuring it. Verifier posture: `match` → accept, `no_match` → reject,
+`unknown`/call-failure → abstain (logged). **Unconfigured verifier**: every cross-language
+sample abstains with the reason that cross-language lexical differences are not evidence,
+and if no usable evidence exists at all the record is `not_run` with original timing
+retained — valid translations are never systematically false-rejected. Same-script pairs
+keep the lexical Dice decision (agreement is meaningful within one language). Mock
+semantic verifiers exist for tests only, stamp `asr_notes.log`, region reasons, and record
+notes with a `test-only` marker, and the CLI wires only
+`get_semantic_verifier()` (env-configured) — never mocks.
 
 ## Registering real reference episodes (G0/G1 — pending user media)
 
@@ -202,7 +228,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 98 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 120 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 
