@@ -26,6 +26,8 @@ python benchmarks\run_bench.py --help
 
 ```
 # Register a read-only reference source; subtitles are sidecars or MKV stream refs.
+# Multi-audio media REQUIRE --audio (see "Stream selection" below); Fx00 has one audio
+# stream and registers with the persisted default selection (sidx:0).
 python benchmarks\run_bench.py source add --path benchmarks\fixtures\Fx00\reference.wav `
   --source-id Fx00 `
   --subtitle "main=sidecar:benchmarks/fixtures/Fx00/episode.ass" `
@@ -33,6 +35,10 @@ python benchmarks\run_bench.py source add --path benchmarks\fixtures\Fx00\refere
   --gold "main=benchmarks/fixtures/Fx00/gold_episode.json" `
   --gold "signs=benchmarks/fixtures/Fx00/gold_signs.json" `
   --rights redistributable-synthetic-fixture
+
+# Example with explicit selection (dual-audio episode with commentary):
+python benchmarks\run_bench.py source add --path benchmarks\private\E01\episode.mkv `
+  --source-id E01 --audio lang:jpn --subtitle "main=mkv:lang:eng"
 
 python benchmarks\run_bench.py source list
 python benchmarks\run_bench.py source inspect --source-id Fx00
@@ -53,6 +59,46 @@ python benchmarks\run_bench.py report --case Fx00-S01 --out benchmarks\results\r
 genuine executed offline run. The synthetic fixture's audio consists of tone bursts
 filling the dialogue windows (silence outside them): it validates harness plumbing
 only, **not** speech-synchronization quality, and no thresholds are calibrated from it.
+
+## Stream selection (reference audio + embedded subtitle tracks)
+
+`source add --audio index:<n>|sidx:<n>|lang:<code>` fixes which audio stream the
+harness decodes for dual-audio/commentary episodes:
+
+- `index:<n>` — the ffprobe **global** stream index (what `source inspect` lists);
+  the stream must exist and be an audio stream.
+- `sidx:<n>` — the ffmpeg **audio-relative** index used in `-map 0:a:<n>`
+  (`0 <= n <` audio stream count).
+- `lang:<code>` — must match **exactly one** audio stream's ffprobe language tag;
+  zero or multiple matches refuse registration with a message listing the audio streams.
+
+Registration validates the spec against ffprobe and persists the resolved identity
+in `cases/sources.json`: `audio_selected: {index, sidx, language, codec_name}` plus
+`audio_spec` (the spec as given). A multi-audio source registered **without**
+`--audio` is refused (exit 2, listing each stream's index/sidx/language and
+instructing `--audio`); a single-audio source defaults to `sidx:0` and persists the
+same structure. `run` decodes the full reference audio **and** the targeted-ASR
+windows (`b1-va`) from the persisted selection: `_get_reference_audio` resolves
+`0:a:<sidx>` and `cmd_run` threads that string into `validate_proposal` →
+`extract_audio_window`. A registry record with >1 audio stream and no persisted
+selection **fails closed** (clear refusal, non-zero rc); legacy single-audio records
+without the field fall back to `0:a:0`. Sources registered before this change
+(real registries) must re-register sources to record their selection. A scratch
+`reference.wav` is reused only when `preprocess.json` records the current
+`audio_stream` and source `media_sha256`; after a re-registration with a
+different `--audio`, or with missing/corrupt metadata, the harness re-extracts
+and rewrites `preprocess.json` — audio decoded under a stale selection is
+never reused.
+
+Embedded MKV subtitle specs are unambiguous — `track_id=mkv:sidx:<n>`
+(ffmpeg subtitle-relative index for `-map 0:s:<n>`), `track_id=mkv:index:<n>`
+(ffprobe global index; must be a subtitle stream), `track_id=mkv:lang:<code>`
+(exactly one match). Sidecar specs are unchanged. Each MKV spec is validated
+against ffprobe at registration, the per-track normalized identity is persisted as
+`subtitle_selected`, and `subtitle_specs` stores the canonical `mkv:sidx:<n>` form
+from which `case prepare` derives `-map 0:s:<sidx>`. A legacy bare `mkv:<digits>`
+spec is **refused**: ffmpeg `-map 0:s:<n>` counts subtitle streams while
+`source inspect` shows ffprobe global indices, so the bare number is ambiguous.
 
 ## Arms
 
@@ -140,7 +186,7 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 67 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 78 tests pass; `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 

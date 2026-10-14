@@ -70,6 +70,98 @@ def _under_root(path: Path, root: Path) -> bool:
     return resolved == root or root in resolved.parents
 
 
+class StreamSelectionError(ValueError):
+    """A stream spec could not be resolved to exactly one stream of its type."""
+
+
+def _typed_streams(streams: list[dict], codec_type: str) -> list[dict]:
+    return [s for s in streams if s.get("codec_type") == codec_type]
+
+
+def _describe_typed_streams(typed: list[dict]) -> str:
+    lines = []
+    for sidx, s in enumerate(typed):
+        lines.append(
+            f"  sidx={sidx} index={s.get('index')} "
+            f"language={(s.get('tags') or {}).get('language') or 'und'} "
+            f"codec={s.get('codec_name')}"
+        )
+    return "\n".join(lines) if lines else "  (none)"
+
+
+def _stream_identity(stream: dict, sidx: int) -> dict:
+    return {
+        "index": stream.get("index"),
+        "sidx": sidx,
+        "language": (stream.get("tags") or {}).get("language"),
+        "codec_name": stream.get("codec_name"),
+    }
+
+
+def _resolve_stream_spec(spec: str, streams: list[dict], codec_type: str) -> dict:
+    """Resolve index:<n>|sidx:<n>|lang:<code> to a normalized stream identity.
+
+    ``index`` is the ffprobe global stream index (must exist and match
+    ``codec_type``); ``sidx`` is the ffmpeg type-relative map index used in
+    ``0:a:<n>``/``0:s:<n>``; ``lang`` must match exactly one stream's ffprobe
+    language tag. Raises StreamSelectionError listing the candidate streams.
+    """
+    typed = _typed_streams(streams, codec_type)
+    listing = f"available {codec_type} streams:\n{_describe_typed_streams(typed)}"
+    kind, sep, value = spec.partition(":")
+    if not sep or kind not in ("index", "sidx", "lang"):
+        raise StreamSelectionError(
+            f"stream spec {spec!r} must be index:<n> (ffprobe global index), "
+            f"sidx:<n> (ffmpeg {codec_type}-relative map index), or lang:<code>; "
+            f"{listing}"
+        )
+    if kind == "lang":
+        matches = [
+            (sidx, s)
+            for sidx, s in enumerate(typed)
+            if (s.get("tags") or {}).get("language") == value
+        ]
+        if len(matches) != 1:
+            raise StreamSelectionError(
+                f"lang:{value} matches {len(matches)} {codec_type} streams "
+                f"(exactly one is required); {listing}"
+            )
+        sidx, stream = matches[0]
+        return _stream_identity(stream, sidx)
+    if not value.isdigit():
+        raise StreamSelectionError(
+            f"stream spec {spec!r} needs a non-negative integer after {kind}:; {listing}"
+        )
+    n = int(value)
+    if kind == "sidx":
+        if not 0 <= n < len(typed):
+            raise StreamSelectionError(
+                f"sidx:{n} is out of range for {len(typed)} {codec_type} "
+                f"streams; {listing}"
+            )
+        return _stream_identity(typed[n], n)
+    for sidx, s in enumerate(typed):
+        if s.get("index") == n:
+            return _stream_identity(s, sidx)
+    raise StreamSelectionError(f"index:{n} is not a {codec_type} stream; {listing}")
+
+
+def _resolve_audio_selection(spec: str | None, streams: list[dict]) -> dict | None:
+    """Resolve the reference-audio track; refuse ambiguous multi-audio sources."""
+    audio = _typed_streams(streams, "audio")
+    if spec:
+        return _resolve_stream_spec(spec, streams, "audio")
+    if len(audio) > 1:
+        raise StreamSelectionError(
+            f"media has {len(audio)} audio streams; register with --audio "
+            f"index:<n>|sidx:<n>|lang:<code> to pick the reference track; "
+            f"{_describe_typed_streams(audio)}"
+        )
+    if len(audio) == 1:
+        return _stream_identity(audio[0], 0)
+    return None
+
+
 def _private_path_policy(
     candidate: Path, benchmarks_root: Path, repo_root: Path
 ) -> str | None:
@@ -187,13 +279,43 @@ def cmd_source_add(args, paths) -> int:
         print(f"source id already registered: {args.source_id}", file=sys.stderr)
         return 2
     streams = ffprobe_streams(media)
+    raw_streams = streams.get("streams", [])
+    try:
+        audio_selected = _resolve_audio_selection(args.audio, raw_streams)
+    except StreamSelectionError as exc:
+        print(f"REFUSED (audio selection): {exc}", file=sys.stderr)
+        return 2
+    audio_spec = args.audio if args.audio else ("sidx:0" if audio_selected else None)
     subtitles: dict[str, str] = {}
     hashes: dict[str, str] = {}
+    subtitle_selected: dict[str, dict] = {}
     for spec in args.subtitle or []:
         track_id, _, target = spec.partition("=")
-        subtitles[track_id] = target
         if target.startswith("sidecar:"):
+            subtitles[track_id] = target
             hashes[track_id] = sha256_file(Path(target.removeprefix("sidecar:")))
+        elif target.startswith("mkv:"):
+            remainder = target.removeprefix("mkv:")
+            if remainder.isdigit():
+                print(
+                    f"REFUSED: legacy subtitle spec {target!r} is ambiguous: ffmpeg "
+                    "-map 0:s:<n> counts only subtitle streams while 'source inspect' "
+                    "lists ffprobe GLOBAL indices. Use mkv:sidx:<n> (ffmpeg "
+                    "subtitle-relative index), mkv:index:<n> (ffprobe global index), "
+                    "or mkv:lang:<code> (unique ffprobe language tag).",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                sel = _resolve_stream_spec(remainder, raw_streams, "subtitle")
+            except StreamSelectionError as exc:
+                print(f"REFUSED (subtitle selection): {exc}", file=sys.stderr)
+                return 2
+            subtitles[track_id] = f"mkv:sidx:{sel['sidx']}"
+            subtitle_selected[track_id] = sel
+        else:
+            print(f"unsupported subtitle spec {target}", file=sys.stderr)
+            return 2
     duration = None
     fmt = streams.get("format", {})
     if fmt.get("duration"):
@@ -214,6 +336,9 @@ def cmd_source_add(args, paths) -> int:
         ],
         "subtitle_specs": subtitles,
         "subtitle_sha256": hashes,
+        "audio_selected": audio_selected,
+        "audio_spec": audio_spec,
+        "subtitle_selected": subtitle_selected,
         "gold_classification": dict(g.split("=", 1) for g in args.gold)
         if args.gold
         else {},
@@ -222,7 +347,8 @@ def cmd_source_add(args, paths) -> int:
     }
     _save_sources(paths["sources"], sources)
     add_source_root(media.parent)
-    print(f"registered source {args.source_id} @ {media}")
+    audio_note = f" (audio 0:a:{audio_selected['sidx']})" if audio_selected else ""
+    print(f"registered source {args.source_id} @ {media}{audio_note}")
     return 0
 
 
@@ -274,10 +400,18 @@ def cmd_case_prepare(args, paths) -> int:
     if spec.startswith("sidecar:"):
         src_ass = Path(spec.removeprefix("sidecar:"))
     elif spec.startswith("mkv:"):
+        remainder = spec.removeprefix("mkv:")
+        kind, _sep, value = remainder.partition(":")
+        if kind != "sidx" or not value.isdigit():
+            print(
+                f"REFUSED: subtitle spec {spec!r} is not a normalized "
+                "mkv:sidx:<n> registration; re-register the source using "
+                "mkv:sidx:<n>, mkv:index:<n>, or mkv:lang:<code>",
+                file=sys.stderr,
+            )
+            return 2
         src_ass = scratch_case / f"{args.track_id}.ass"
-        extract_subtitle_stream(
-            Path(s["media_path"]), spec.removeprefix("mkv:"), src_ass
-        )
+        extract_subtitle_stream(Path(s["media_path"]), int(value), src_ass)
     else:
         print(f"unsupported subtitle spec {spec}", file=sys.stderr)
         return 2
@@ -332,20 +466,58 @@ def cmd_case_list(args, paths) -> int:
     return 0
 
 
-def _get_reference_audio(paths: Path, case: CaseManifest, sources: dict) -> Path:
+def _get_reference_audio(
+    paths: dict[str, Path], case: CaseManifest, sources: dict
+) -> tuple[Path, str | None]:
+    """Return (reference wav, ffmpeg audio map string) for the case's source.
+
+    Uses the persisted registration selection; legacy single-audio records
+    without one fall back to 0:a:0; multi-audio records without a persisted
+    selection fail closed. A cached ``reference.wav`` is reused only when
+    ``preprocess.json`` records the current audio map string and source media
+    fingerprint; stale, missing, or corrupt metadata forces re-extraction, so
+    a re-registration with a different ``--audio`` never reuses old audio.
+    """
     s = sources["sources"][case.source_id]
     media = Path(s["media_path"])
-    audio_stream = None
+    sel = s.get("audio_selected")
+    if sel is not None:
+        audio_stream = f"0:a:{sel['sidx']}"
+    else:
+        n_audio = len(_typed_streams(s.get("streams", []), "audio"))
+        if n_audio > 1:
+            raise StreamSelectionError(
+                f"source {case.source_id} has {n_audio} audio streams but no "
+                "persisted audio_selected; re-register with --audio so the "
+                "intended track is decoded"
+            )
+        audio_stream = None
     scratch_case = paths["scratch"] / case.case_id
     ref_wav = scratch_case / "reference.wav"
-    if not ref_wav.exists():
-        t0 = time.monotonic()
-        extract_audio(media, ref_wav, audio_stream=audio_stream)
-        write_json(
-            scratch_case / "preprocess.json",
-            {"audio_extraction_seconds": time.monotonic() - t0},
-        )
-    return ref_wav
+    preprocess_path = scratch_case / "preprocess.json"
+    media_sha256 = sha256_file(media)
+    if ref_wav.exists():
+        try:
+            cached = read_json(preprocess_path)
+        except (OSError, ValueError):
+            cached = None
+        if (
+            cached is not None
+            and cached.get("audio_stream") == audio_stream
+            and cached.get("media_sha256") == media_sha256
+        ):
+            return ref_wav, audio_stream
+    t0 = time.monotonic()
+    extract_audio(media, ref_wav, audio_stream=audio_stream)
+    write_json(
+        preprocess_path,
+        {
+            "audio_extraction_seconds": time.monotonic() - t0,
+            "audio_stream": audio_stream,
+            "media_sha256": media_sha256,
+        },
+    )
+    return ref_wav, audio_stream
 
 
 def cmd_run(args, paths) -> int:
@@ -369,7 +541,13 @@ def cmd_run(args, paths) -> int:
         corrupted = Track.load(corrupted_path, case.fmt)
         corrupted_times = corrupted.time_map()
         cue_text = {c.cue_id: c.text for c in corrupted.cues}
-        ref_wav = _get_reference_audio(paths, case, sources)
+        ref_wav = None
+        audio_stream = None
+        try:
+            ref_wav, audio_stream = _get_reference_audio(paths, case, sources)
+        except StreamSelectionError as exc:
+            print(f"REFUSED ({case_id}): {exc}", file=sys.stderr)
+            return 4
         for cand in candidates:
             if cand == "b1-va":
                 continue
@@ -429,6 +607,7 @@ def cmd_run(args, paths) -> int:
                 transcriber,
                 args.language,
                 args.seed,
+                audio_stream=audio_stream,
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())
@@ -550,7 +729,15 @@ def build_parser() -> argparse.ArgumentParser:
     pa.add_argument(
         "--subtitle",
         action="append",
-        help="track_id=sidecar:<file> or track_id=mkv:<stream-index>",
+        help="track_id=sidecar:<file> or track_id=mkv:sidx:<n>|mkv:index:<n>|mkv:lang:<code> "
+        "(sidx = ffmpeg 0:s:n subtitle-relative index; index = ffprobe global index; "
+        "lang = exact unique ffprobe language tag; normalized to mkv:sidx:<n> at registration)",
+    )
+    pa.add_argument(
+        "--audio",
+        help="audio stream spec: index:<n> (ffprobe global index), sidx:<n> "
+        "(ffmpeg 0:a:n map index), or lang:<code> (exact unique ffprobe language "
+        "tag); required when the media has more than one audio stream",
     )
     pa.add_argument(
         "--gold",

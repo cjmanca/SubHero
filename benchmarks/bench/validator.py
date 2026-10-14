@@ -116,7 +116,13 @@ def validate_proposal(
     transcriber,
     language: str,
     seed: int,
+    audio_stream: str | None = None,
 ) -> AcceptanceRecord:
+    """Validate a base arm's proposals with targeted ASR windows.
+
+    ``audio_stream`` is the ffmpeg map string (e.g. ``0:a:1``) for the source's
+    registered audio track; ``None`` keeps legacy behavior (``0:a:0``).
+    """
     if transcriber is None:
         return AcceptanceRecord(
             case_id=case.case_id,
@@ -168,6 +174,7 @@ def validate_proposal(
                 wav,
                 max(0.0, (start_us - PAD_US) / 1_000_000),
                 (end_us + PAD_US) / 1_000_000,
+                audio_stream=audio_stream,
             )
             result = transcriber.transcribe_window(wav, language, key=cid)
         except Exception as exc:  # noqa: BLE001 -- boundary failures are abstentions, not passes

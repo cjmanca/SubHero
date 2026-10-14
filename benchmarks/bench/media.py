@@ -145,8 +145,15 @@ def extract_audio_window(
     return time.monotonic() - started
 
 
-def extract_subtitle_stream(media_path: Path, stream_id: str, out_ass: Path) -> None:
-    """Copy one embedded subtitle stream out of the container into scratch (read-only input)."""
+def extract_subtitle_stream(media_path: Path, sidx: int, out_ass: Path) -> None:
+    """Copy one embedded subtitle stream out of the container into scratch (read-only input).
+
+    ``sidx`` is the ffmpeg **subtitle-relative** index used in ``-map 0:s:<sidx>``:
+    the 0-based position of the stream among subtitle streams in ffprobe order.
+    It is **not** the ffprobe global stream index; callers resolve global-index
+    and language specs to this ``sidx`` once, at source registration, and persist
+    the normalized identity.
+    """
     ffmpeg = _tool("ffmpeg")
     ensure_scratch_path(out_ass)
     proc = subprocess.run(
@@ -158,7 +165,7 @@ def extract_subtitle_stream(media_path: Path, stream_id: str, out_ass: Path) -> 
             "-i",
             str(media_path),
             "-map",
-            f"0:s:{stream_id}",
+            f"0:s:{int(sidx)}",
             "-c:s",
             "ass",
             str(out_ass),
