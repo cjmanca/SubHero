@@ -10,7 +10,7 @@ This document is an **uncertainty register**, not a list of requirements already
 | E04 | Sidecar filename qualifiers for multiple same-language tracks, release group suffixes and Bazarr compatibility | Collision-safe language renaming and output names |
 | E05 | Unraid `/mnt/user` atomic rename behavior for target files across disks/pools and preferred staging placement | Critical no-partial-file invariant |
 | E06 | Safe non-MKV → MKV path migration without Plex identity churn and unsupported stream loss | Conversion/publication policy |
-| E07 | ffsubsync global and experimental piecewise behavior, VAD/sign proxy quality, targeted ASR sample strategy; ALASS comparator | Trustworthy lightweight timing fixes |
+| E07 | ffsubsync global and experimental piecewise behavior, VAD/sign proxy quality, targeted ASR sample strategy; ALASS comparator | Trustworthy lightweight timing fixes. Harness + B1 arms executable (2026-10-14, `benchmarks/`); ffsubsync 0.5.1 verified, ALASS absent (`unsupported`), ASR endpoint unconfigured (`not_run`); only synthetic plumbing evidence so far — no candidate selected; real-media matrix pending E01/E02 |
 | E08 | Model/binding limits: Qwen aligner input length across versions, actual Chinese/Japanese/Korean ASR+timestamps on TV/anime | Full-episode transcription feasibility |
 | E09 | Direct multilingual embeddings vs translated text vs hybrid matching; merge/split/gaps/jumps | Accuracy and inference cost of correspondence |
 | E10 | Hy-MT2-1.8B vs 7B vs source-grounded checking; rate of false-positive translation edits | Whether translation correction helps more than harms |
