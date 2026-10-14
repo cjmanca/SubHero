@@ -7,6 +7,8 @@ Run `python -m bench [--help]` from the `benchmarks/` directory, or
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -75,6 +77,67 @@ def _under_root(path: Path, root: Path) -> bool:
     resolved = Path(path).resolve()
     root = Path(root).resolve()
     return resolved == root or root in resolved.parents
+
+
+def _root_refuse(resolved: Path, reason: str) -> int:
+    print(
+        f"REFUSED (--root): {resolved} {reason}. Use an out-of-repo --root, the "
+        f"canonical benchmarks root {Path(DEFAULT_ROOT).resolve()}, or a --root "
+        "inside a Git-ignored area (for example "
+        f"{(Path(REPO_ROOT) / 'benchmarks' / 'private').resolve()}/<name>/, "
+        f"{(Path(REPO_ROOT) / 'benchmarks' / '_scratch').resolve()}/, or "
+        f"{(Path(REPO_ROOT) / 'benchmarks' / 'results').resolve()}/).",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _refuse_unsafe_root(root: Path, repo_root: Path, default_root: Path) -> int | None:
+    """Refuse an in-repo ``--root`` whose generated layout is not proven Git-ignored.
+
+    The harness writes ``<root>/cases/sources.json``, ``<root>/private/…``,
+    ``<root>/_scratch/…`` and ``<root>/results/…``. The committed ``.gitignore``
+    protects ONLY the canonical default root's locations, so a fresh in-repo root
+    such as ``benchmarks/custom-root/`` would make private media, manifests,
+    scratch, and results eligible for a normal ``git add -A`` tracked commit.
+
+    Roots outside the repository are allowed (out-of-repo/read-only-mount flows).
+    The canonical default root is explicitly allowed: its layout is covered by
+    committed ignore rules. Any other in-repo root must be proven ignored via
+    ``git check-ignore`` from the repository root; when git is unavailable the
+    ignorability cannot be proven, so such roots are refused (fail-closed).
+    """
+    resolved = Path(root).resolve()
+    if not _under_root(resolved, repo_root):
+        return None
+    if resolved == Path(default_root).resolve():
+        return None
+    git = shutil.which("git")
+    if git is None:
+        return _root_refuse(
+            resolved,
+            "is in-repo and git is unavailable, so Git-ignorability cannot be proven",
+        )
+    proc = subprocess.run(
+        [
+            git,
+            "-C",
+            str(Path(repo_root).resolve()),
+            "check-ignore",
+            "-q",
+            "--",
+            str(resolved),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0:
+        return None
+    return _root_refuse(
+        resolved,
+        "is in-repo but not Git-ignored (its manifests/scratch/results would become committable)",
+    )
 
 
 class StreamSelectionError(ValueError):
@@ -181,36 +244,56 @@ def _resolve_user_path(raw: str) -> Path:
 
 
 def _private_path_policy(
-    candidate: Path, benchmarks_root: Path, repo_root: Path
+    candidate: Path, benchmarks_root: Path, repo_root: Path, rights: str
 ) -> str | None:
-    """Return a refusal reason for in-repo paths outside the private/fixtures homes.
+    """Return a refusal reason for in-repo paths outside the rights-appropriate homes.
 
-    Paths outside the repository (e.g. read-only mounts) are allowed. Inside the repo,
-    registered media, sidecar subtitles, and gold annotations must live under
-    ``benchmarks/private/`` (real reference episodes) or ``benchmarks/fixtures/``
-    (redistributable synthetic fixtures) of the REPOSITORY layout, plus the
-    ``private/`` and ``fixtures/`` homes of the active benchmarks root (they
-    coincide when the root is the repository's benchmarks directory, and both
-    apply when working with a temporary ``--root``).
+    Paths outside the repository (e.g. read-only mounts) are allowed for every
+    rights class. Inside the repo the permitted home is rights-aware:
+
+    * ``--rights redistributable-synthetic-fixture`` may target the ``fixtures/``
+      homes (the synthetic coherence check in ``cmd_source_add`` further pins
+      these to the canonical committed fixtures home) and, permissively, the
+      private homes.
+    * Any non-synthetic rights claim (``private-local``, i.e. real reference
+      episodes) may target ONLY the private homes — the canonical
+      ``benchmarks/private/`` and the active root's ``private/`` — never the
+      tracked ``benchmarks/fixtures/`` home, which is reserved for explicitly
+      declared redistributable synthetic references. A private episode placed in
+      the fixtures home is eligible for a normal tracked commit, so it is refused.
+
     The candidate must be the exact resolved path the consumers will open
     (CWD-joined for user-given relative paths).
     """
     resolved = Path(candidate).resolve()
     if not _under_root(resolved, repo_root):
         return None
-    homes = [
+    private_homes = [
         Path(repo_root) / "benchmarks" / "private",
-        Path(repo_root) / "benchmarks" / "fixtures",
         Path(benchmarks_root) / "private",
-        Path(benchmarks_root) / "fixtures",
     ]
+    homes = list(private_homes)
+    if rights == SYNTHETIC_RIGHTS:
+        homes += [
+            Path(repo_root) / "benchmarks" / "fixtures",
+            Path(benchmarks_root) / "fixtures",
+        ]
     for home in homes:
         if _under_root(resolved, home):
             return None
+    if rights == SYNTHETIC_RIGHTS:
+        return (
+            f"in-repo path {resolved} is outside benchmarks/private/ and "
+            f"benchmarks/fixtures/; register synthetic references under "
+            f"{(Path(repo_root) / 'benchmarks' / 'fixtures').resolve()} "
+            "or outside the repository (read-only mounts are allowed)"
+        )
     return (
-        f"in-repo path {resolved} is outside benchmarks/private/ and benchmarks/fixtures/; "
-        f"register private data under {(benchmarks_root / 'private').resolve()} "
-        "or outside the repository (read-only mounts are allowed)"
+        f"in-repo path {resolved} is outside benchmarks/private/; --rights {rights} "
+        f"registrations must live under {(benchmarks_root / 'private').resolve()} "
+        f"or the repository private home {(Path(repo_root) / 'benchmarks' / 'private').resolve()} "
+        "or outside the repository (read-only mounts are allowed); "
+        f"benchmarks/fixtures/ is reserved for --rights {SYNTHETIC_RIGHTS}"
     )
 
 
@@ -381,7 +464,7 @@ def cmd_source_add(args, paths) -> int:
         _, _, target = gold_spec.partition("=")
         policy_targets.append(_resolve_user_path(target))
     for target in policy_targets:
-        reason = _private_path_policy(target, paths["root"], REPO_ROOT)
+        reason = _private_path_policy(target, paths["root"], REPO_ROOT, args.rights)
         if reason is not None:
             print(f"REFUSED (private data policy): {reason}", file=sys.stderr)
             return 2
@@ -996,7 +1079,15 @@ def build_parser() -> argparse.ArgumentParser:
         description=f"SubHero benchmark harness v{__version__} (B0+B1, offline, read-only sources)",
     )
     parser.add_argument(
-        "--root", type=Path, default=DEFAULT_ROOT, help="benchmarks root directory"
+        "--root",
+        type=Path,
+        default=DEFAULT_ROOT,
+        help=(
+            "benchmarks root directory; must be outside the repository, the "
+            "canonical benchmarks root, or inside a Git-ignored area (a fresh "
+            "in-repo root is refused so private manifests/scratch/results never "
+            "become committable)"
+        ),
     )
     parser.add_argument(
         "--forbidden-root",
@@ -1121,7 +1212,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    paths = _paths(Path(args.root).resolve())
+    root = Path(args.root).resolve()
+    refused_root = _refuse_unsafe_root(root, REPO_ROOT, DEFAULT_ROOT)
+    if refused_root is not None:
+        return refused_root
+    paths = _paths(root)
     scratch_roots = [
         paths["scratch"],
         paths["results"],

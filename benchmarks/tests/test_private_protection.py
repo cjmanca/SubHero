@@ -204,7 +204,8 @@ def test_relative_sidecar_registration_from_repo_root_matches_documented_flow(
 def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
     root = tmp_path / "benchroot2"
     monkeypatch.chdir(BENCH_ROOT)
-    # relative from benchmarks CWD -> allowed fixtures home
+    # relative from benchmarks CWD -> allowed fixtures home (synthetic rights only;
+    # F05: private-local may NOT target the tracked fixtures home)
     rc = cli.main(
         [
             "--root",
@@ -218,12 +219,34 @@ def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
             "--subtitle",
             "main=sidecar:fixtures/Fx00/episode.ass",
             "--rights",
-            "private-local",
+            "redistributable-synthetic-fixture",
         ]
     )
     assert rc == 0
     assert (root / "cases" / "sources.json").is_file()
     capsys.readouterr()
+    # F05: a private-local claim against the tracked fixtures home is refused
+    rc = cli.main(
+        [
+            "--root",
+            str(root),
+            "source",
+            "add",
+            "--path",
+            "fixtures/Fx00/reference.wav",
+            "--source-id",
+            "FXPVT",
+            "--subtitle",
+            "main=sidecar:fixtures/Fx00/episode.ass",
+            "--rights",
+            "private-local",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "REFUSED (private data policy)" in captured.err
+    registry = (root / "cases" / "sources.json").read_text(encoding="utf-8")
+    assert "FXPVT" not in registry
     # relative escaping: ../evil.ass from benchmarks CWD = benchmarks/evil.ass -> refused
     rc = cli.main(
         [
@@ -238,7 +261,7 @@ def test_relative_sidecar_resolution_follows_cwd(tmp_path, monkeypatch, capsys):
             "--subtitle",
             "main=sidecar:../evil.ass",
             "--rights",
-            "private-local",
+            "redistributable-synthetic-fixture",
         ]
     )
     captured = capsys.readouterr()
@@ -266,14 +289,30 @@ def test_private_path_policy(tmp_path):
     stray_media.write_bytes(b"stub")
     stray_cases = bench / "media" / "evil.wav"
     stray_cases.write_bytes(b"stub")
+    synth = cli.SYNTHETIC_RIGHTS
 
-    assert cli._private_path_policy(private_ep, bench, repo) is None
-    assert cli._private_path_policy(private_ep.parent, bench, repo) is None
-    assert cli._private_path_policy(fixture, bench, repo) is None
-    assert cli._private_path_policy(outside, bench, repo) is None
-    assert cli._private_path_policy(stray_media, bench, repo) is not None
-    assert cli._private_path_policy(stray_cases, bench, repo) is not None
-    assert cli._private_path_policy(repo / "other" / "x.wav", bench, repo) is not None
+    # private home is allowed for both rights classes
+    assert cli._private_path_policy(private_ep, bench, repo, "private-local") is None
+    assert (
+        cli._private_path_policy(private_ep.parent, bench, repo, "private-local")
+        is None
+    )
+    assert cli._private_path_policy(private_ep, bench, repo, synth) is None
+    # fixtures home is allowed ONLY for declared synthetic rights (F05 escape)
+    assert cli._private_path_policy(fixture, bench, repo, synth) is None
+    assert cli._private_path_policy(fixture, bench, repo, "private-local") is not None
+    # out-of-repo is allowed for all rights
+    assert cli._private_path_policy(outside, bench, repo, "private-local") is None
+    assert cli._private_path_policy(outside, bench, repo, synth) is None
+    # in-repo strays refused for both
+    assert (
+        cli._private_path_policy(stray_media, bench, repo, "private-local") is not None
+    )
+    assert cli._private_path_policy(stray_cases, bench, repo, synth) is not None
+    assert (
+        cli._private_path_policy(repo / "other" / "x.wav", bench, repo, "private-local")
+        is not None
+    )
 
 
 def test_case_manifest_routing(tmp_path):
