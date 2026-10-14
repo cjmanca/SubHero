@@ -399,6 +399,8 @@ def test_reference_audio_fails_closed_without_selection(tmp_path):
                     "audio_extraction_seconds": 0.0,
                     "audio_stream": audio_stream,
                     "media_sha256": media_sha,
+                    "case_id": "c1",
+                    "reference_sha256": sha256_file(ref_dir / "reference.wav"),
                 }
             ),
             encoding="utf-8",

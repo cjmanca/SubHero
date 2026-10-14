@@ -21,6 +21,7 @@ from .adapters import (
 )
 from .asr import get_semantic_verifier, get_transcriber
 from .corrupt import prepare_case
+from .fingerprint import compute_input_fingerprint
 from .manifests import CaseManifest, ProposalRecord, read_json, write_json
 from .media import extract_audio, extract_subtitle_stream, ffprobe_streams, sha256_file
 from .paths import add_source_root, configure, require_safe_id
@@ -290,6 +291,71 @@ def _verify_sources(
         elif sha256_file(generated) != case.generated_subtitle_sha256:
             problems.append("case input no longer matches case manifest fingerprint")
     return problems
+
+
+def _provenance_problem(
+    cand_dir: Path,
+    candidate_id: str,
+    case: CaseManifest,
+    source: dict,
+) -> str:
+    """Return a refusal reason when persisted candidate artifacts are not bound
+    to the current case generation; the empty string when they are.
+
+    Versioned provenance (schema_version 2 ``run.json``) is the only basis for
+    trusting a persisted proposal: the recorded ``input_fingerprint`` must equal
+    the fingerprint recomputed from the *current* case manifest + registry
+    source record + candidate id + recorded tool versions, and the
+    ``proposal.json`` bytes on disk must match the recorded ``proposal_sha256``.
+    Missing, legacy (schema 1), stale, or tampered artifacts are reported as
+    ``UNVERIFIED:``/``STALE:`` and always require a fresh candidate run.
+    """
+    label = f"{case.case_id}/{candidate_id}"
+    rerun = f"re-run it: run --case {case.case_id} --candidate {candidate_id}"
+    run_path = cand_dir / "run.json"
+    if not run_path.exists():
+        return f"UNVERIFIED: {label} has proposal.json with no run.json provenance; {rerun}"
+    try:
+        run = read_json(run_path)
+    except (OSError, ValueError) as exc:
+        return f"UNVERIFIED: {label} run.json is unreadable ({exc}); {rerun}"
+    recorded = run.get("input_fingerprint")
+    if not recorded:
+        return (
+            f"UNVERIFIED: {label} run.json (schema_version "
+            f"{run.get('schema_version', '?')}) predates versioned input "
+            f"fingerprints and cannot be bound to this case generation; {rerun}"
+        )
+    current = compute_input_fingerprint(
+        case, source, candidate_id, run.get("tool_versions", {})
+    )
+    if recorded != current:
+        return (
+            f"STALE: {label} was run against a different case generation "
+            f"(run.json input_fingerprint {recorded[:16]}… != current {current[:16]}…; "
+            f"case seed/inputs, selected audio, source fingerprint, or tool "
+            f"identity changed); {rerun}"
+        )
+    recorded_proposal = run.get("proposal_sha256")
+    prop_path = cand_dir / "proposal.json"
+    if not recorded_proposal:
+        return (
+            f"UNVERIFIED: {label} run.json records no proposal_sha256; "
+            f"proposal bytes are unbound; {rerun}"
+        )
+    if not prop_path.is_file():
+        return (
+            f"UNVERIFIED: {label} run.json claims a proposal but proposal.json "
+            f"is missing; {rerun}"
+        )
+    actual = sha256_file(prop_path)
+    if actual != recorded_proposal:
+        return (
+            f"STALE: {label} proposal.json bytes no longer match run.json "
+            f"proposal_sha256 (recorded {recorded_proposal[:16]}… vs actual "
+            f"{actual[:16]}…; tampered or replaced?); {rerun}"
+        )
+    return ""
 
 
 def cmd_source_add(args, paths) -> int:
@@ -578,8 +644,11 @@ def _get_reference_audio(
     without one fall back to 0:a:0; multi-audio records without a persisted
     selection fail closed. A cached ``reference.wav`` is reused only when
     ``preprocess.json`` records the current audio map string and source media
-    fingerprint; stale, missing, or corrupt metadata forces re-extraction, so
-    a re-registration with a different ``--audio`` never reuses old audio.
+    fingerprint **and** its recorded ``reference_sha256`` equals the actual
+    sha256 of the WAV bytes on disk; stale, missing, corrupt (tampered,
+    replaced, stubbed), or byte-hash-less metadata forces re-extraction, so a
+    re-registration with a different ``--audio`` never reuses old audio and a
+    swapped WAV is never trusted on JSON metadata alone.
     """
     s = sources["sources"][case.source_id]
     media = Path(s["media_path"])
@@ -613,6 +682,7 @@ def _get_reference_audio(
             cached is not None
             and cached.get("audio_stream") == audio_stream
             and cached.get("media_sha256") == media_sha256
+            and cached.get("reference_sha256") == sha256_file(ref_wav)
         ):
             return ref_wav, audio_stream
     t0 = time.monotonic()
@@ -623,6 +693,8 @@ def _get_reference_audio(
             "audio_extraction_seconds": time.monotonic() - t0,
             "audio_stream": audio_stream,
             "media_sha256": media_sha256,
+            "case_id": case.case_id,
+            "reference_sha256": sha256_file(ref_wav),
         },
     )
     return ref_wav, audio_stream
@@ -659,6 +731,7 @@ def cmd_run(args, paths) -> int:
             for p in problems:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
+        source = sources["sources"][case.source_id]
         corrupted_path = _resolve_generated(paths, case)
         corrupted = Track.load(corrupted_path, case.fmt)
         corrupted_times = corrupted.time_map()
@@ -698,17 +771,26 @@ def cmd_run(args, paths) -> int:
             except ValueError as exc:
                 print(f"REFUSED ({case_id}/{cand}): {exc}", file=sys.stderr)
                 return 2
-            write_json(scratch_dir / "proposal.json", proposal.to_json())
+            proposal_path = scratch_dir / "proposal.json"
+            write_json(proposal_path, proposal.to_json())
+            proposal_sha256 = sha256_file(proposal_path)
             write_json(
                 scratch_dir / "run.json",
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "run_id": f"{case_id}-{cand}-{int(time.time())}",
                     "case_id": case_id,
                     "candidate_id": cand,
                     "status": proposal.mapping_status,
                     "reason": proposal.notes,
                     "input_sha256": case.generated_subtitle_sha256,
+                    # Versioned identity of everything this run consumed: case
+                    # generation + selected source audio + rights + candidate +
+                    # tool probes. score/b1-va recompute and require equality.
+                    "input_fingerprint": compute_input_fingerprint(
+                        case, source, cand, meta.get("tool_versions", {})
+                    ),
+                    "proposal_sha256": proposal_sha256,
                     "tool_versions": meta.get("tool_versions", {}),
                     "preprocessing_seconds": meta.get("preprocessing_seconds", 0.0),
                     "candidate_seconds": meta.get("candidate_seconds", 0.0),
@@ -725,6 +807,14 @@ def cmd_run(args, paths) -> int:
                 )
                 rc = 2
                 continue
+            base_problem = _provenance_problem(base_dir, base, case, source)
+            if base_problem:
+                print(
+                    f"REFUSED ({case_id}/b1-va): base proposal unusable — {base_problem}",
+                    file=sys.stderr,
+                )
+                rc = 6
+                continue
             base_proposal = ProposalRecord(**read_json(base_proposal_path))
             # Transcription (BENCH_ASR_*) and semantic verification
             # (BENCH_SEM_VERIFY_*) are independently configured boundaries;
@@ -735,7 +825,6 @@ def cmd_run(args, paths) -> int:
             # audio language (CLI hint, falling back to the persisted
             # audio_selected ffprobe tag) and the target subtitle language (CLI
             # hint, falling back to the registry-captured per-track language).
-            source = sources["sources"][case.source_id]
             audio_hint = args.language
             if normalize_language(audio_hint) is None:
                 persisted_audio = (source.get("audio_selected") or {}).get("language")
@@ -764,12 +853,13 @@ def cmd_run(args, paths) -> int:
             )
             va_dir = paths["results"] / case_id / "b1-va"
             write_json(va_dir / "acceptance.json", acc.to_json())
-            write_json(va_dir / "proposal.json", base_proposal.to_json())
-            source_media = Path(sources["sources"][case.source_id]["media_path"])
+            va_proposal_path = va_dir / "proposal.json"
+            write_json(va_proposal_path, base_proposal.to_json())
+            source_media = Path(source["media_path"])
             write_json(
                 va_dir / "run.json",
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "run_id": f"{case_id}-b1-va-{int(time.time())}",
                     "case_id": case_id,
                     "candidate_id": "b1-va",
@@ -777,6 +867,15 @@ def cmd_run(args, paths) -> int:
                     "reason": acc.notes,
                     "asr_seconds": acc.asr_seconds,
                     "asr_calls": acc.asr_calls,
+                    "input_sha256": case.generated_subtitle_sha256,
+                    # b1-va commits to the same case-generation identity as its
+                    # base arm (base validity is verified before validating).
+                    "input_fingerprint": compute_input_fingerprint(
+                        case, source, "b1-va", {}
+                    ),
+                    "proposal_sha256": sha256_file(va_proposal_path),
+                    "validated_candidate_id": base,
+                    "base_proposal_sha256": sha256_file(base_proposal_path),
                     # Provenance: which source audio stream the decoded
                     # reference.wav (validated windows' sole input) came from.
                     "audio_stream": audio_stream,
@@ -797,6 +896,7 @@ def cmd_score(args, paths) -> int:
         refused = _refuse_unsafe_id(case_id, "case id")
         if refused is not None:
             return refused
+    rc = 0
     for case_id in args.case:
         case_path = _lookup_case_path(paths, case_id)
         if case_path is None:
@@ -809,6 +909,7 @@ def cmd_score(args, paths) -> int:
             for p in problems:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
+        source = sources["sources"][case.source_id]
         corrupted = Track.load(_resolve_generated(paths, case), case.fmt)
         corrupted_times = corrupted.time_map()
         candidates = list(CANDIDATES) if args.all else args.candidate
@@ -816,6 +917,25 @@ def cmd_score(args, paths) -> int:
             d = paths["results"] / case_id / cand
             prop_path = d / "proposal.json"
             if not prop_path.exists():
+                continue
+            # Provenance gate: a persisted proposal is scoreable only when its
+            # run.json binds it to THIS case generation (fingerprint) and its
+            # bytes still match the recorded proposal_sha256. Legacy/unverified,
+            # stale, and tampered artifacts are refused with rc 6 and any
+            # pre-existing score.json for that candidate is deleted so a stale
+            # number cannot leak into reports.
+            provenance = _provenance_problem(d, cand, case, source)
+            if provenance:
+                print(f"REFUSED ({case_id}/{cand}): {provenance}", file=sys.stderr)
+                stale_score = d / "score.json"
+                if stale_score.exists():
+                    stale_score.unlink()
+                    print(
+                        f"deleted stale score.json for {case_id}/{cand} "
+                        "(not recomputed from verified data)",
+                        file=sys.stderr,
+                    )
+                rc = 6
                 continue
             proposal = ProposalRecord(**read_json(prop_path))
             proposal.candidate_id = cand
@@ -836,7 +956,7 @@ def cmd_score(args, paths) -> int:
             print(
                 f"scored {case_id}/{cand}: median final onset err {score['timing_errors_final_us']['median_abs_us']} us"
             )
-    return 0
+    return rc
 
 
 def cmd_report(args, paths) -> int:
@@ -948,7 +1068,14 @@ def build_parser() -> argparse.ArgumentParser:
     pl = ssub.add_parser("list")
     pl.set_defaults(func=cmd_case_list)
 
-    p = sub.add_parser("run", help="run candidate adapters")
+    p = sub.add_parser(
+        "run",
+        help=(
+            "run candidate adapters (exit 0 ok, 2 unsafe id/missing case, 3 source "
+            "mutation, 4 audio-selection refusal, 6 stale base proposal for b1-va: "
+            "re-run the base candidate)"
+        ),
+    )
     p.add_argument("--case", action="append", required=True)
     p.add_argument("--candidate", action="append", default=[], choices=list(CANDIDATES))
     p.add_argument("--all", action="store_true")
@@ -966,7 +1093,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tol-good-us", type=int, default=50_000)
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("score", help="score proposals vs injected ground truth")
+    p = sub.add_parser(
+        "score",
+        help=(
+            "score proposals vs injected ground truth (exit 0 ok, 2 unsafe id/"
+            "missing case, 3 source mutation, 6 STALE/UNVERIFIED candidate "
+            "results: run.json provenance missing, legacy, bound to a different "
+            "case generation/selected audio, or proposal.json bytes tampered — "
+            "the candidate must be re-run; its stale score.json is deleted)"
+        ),
+    )
     p.add_argument("--case", action="append", required=True)
     p.add_argument("--candidate", action="append", default=[], choices=list(CANDIDATES))
     p.add_argument("--all", action="store_true")

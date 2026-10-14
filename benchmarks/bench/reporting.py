@@ -37,7 +37,7 @@ def build_report(
         lines.append("")
 
     for case_id in case_ids:
-        case_runs = [r for r in runs if r["case_id"] == case_id]
+        case_runs = [r for r in runs if r.get("case_id") == case_id]
         case_scores = [s for s in scores if s["case_id"] == case_id]
         if not case_runs and not case_scores:
             continue
@@ -57,7 +57,8 @@ def build_report(
             dis = s["discontinuities"]
             te = s["timing_errors_final_us"]
             run = next(
-                (r for r in case_runs if r["candidate_id"] == s["candidate_id"]), {}
+                (r for r in case_runs if r.get("candidate_id") == s["candidate_id"]),
+                {},
             )
             lines.append(
                 "| {cand} | {status} | {prop} | {acc} | {rep} | {wor} | {hp}/{ha} | {med} / {p90} / {p95} | {imp}/{mat}/{fp} | {unres}/{tb} | {tot}/{alt}/{unalt} |".format(
@@ -133,7 +134,14 @@ def build_report(
                     "candidate moved the subtitles; exact recovery means applied_shift == -true_offset)"
                 )
         for r in case_runs:
-            bits = [f"- `{r['candidate_id']}`: {r['status']}"]
+            bits = [f"- `{r.get('candidate_id', '?')}`: {r.get('status', '?')}"]
+            if int(r.get("schema_version", 1) or 1) >= 2 and r.get("input_fingerprint"):
+                bits.append(f"input {str(r['input_fingerprint'])[:16]}…")
+            else:
+                bits.append(
+                    "legacy unverified run (no input fingerprint; re-run to bind "
+                    "provenance)"
+                )
             if r.get("reason"):
                 bits.append(f"reason: {r['reason'][:400]}")
             if r.get("wall_seconds") is not None:
