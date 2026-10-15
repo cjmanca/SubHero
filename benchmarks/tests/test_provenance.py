@@ -561,7 +561,7 @@ def test_fresh_pipeline_scores_and_reports(tmp_path, fixture_dir):
     score = json.loads(
         (root / "results" / "GOODX" / "b1-n" / "score.json").read_text(encoding="utf-8")
     )
-    assert score["schema_version"] == 3
+    assert score["schema_version"] == 4
     assert "timing_errors_final_us" in score
     assert cli.main(["--root", str(root), "report", "--case", "GOODX"]) == 0
     report = (root / "results" / "report.md").read_text(encoding="utf-8")

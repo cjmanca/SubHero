@@ -259,7 +259,7 @@ def test_genuine_b1va_flow_scores_with_bound_acceptance(
     assert _score(root, "GVA", "b1-va") == 0
     run = _load(va_dir / "run.json")
     score = _load(va_dir / "score.json")
-    assert score["schema_version"] == 3
+    assert score["schema_version"] == 4
     assert score["final_semantics"] == "accepted_output"
     assert score["input_fingerprint"] == run["input_fingerprint"]
     # Tampering the genuine acceptance bytes now refuses (rc 6), not rescores.

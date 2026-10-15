@@ -477,7 +477,7 @@ def test_tool_only_score_uses_counterfactual_names(tmp_path, fixture_dir):
     # plus the direct perfect inverse below.
     assert _score(root, "LBL1", "b1-n") == 0
     score = _load(_cand_dir(root, "LBL1", "b1-n") / "score.json")
-    assert score["schema_version"] == 3
+    assert score["schema_version"] == 4
     assert score["final_semantics"] == "unguarded_proposal_if_blindly_applied"
     assert "accepted_nonzero" not in score["counts"]
     assert "if_blindly_applied_nonzero" in score["counts"]
@@ -698,7 +698,7 @@ def test_b1va_run_json_records_separated_metrics(tmp_path, fixture_dir, monkeypa
 
 def test_schema2_pair_renders_only_in_legacy_section(tmp_path, fixture_dir):
     """Review D3: schema-2 rows must render in the labeled legacy section
-    (fp-only binding, the schema-appropriate rule), never as schema-3
+    (fp-only binding, the schema-appropriate rule), never as schema-4
     comparative numbers and never silently vanished."""
     root = _setup(tmp_path, fixture_dir)
     assert _prepare(root, "LGCY", "S01", 1) == 0
@@ -741,7 +741,7 @@ def test_schema2_pair_renders_only_in_legacy_section(tmp_path, fixture_dir):
     assert "Legacy schema-2 measurements (NOT COMPARABLE)" in report
     assert "pre-F06 measurement" in report
     assert "legacy schema-2 rows rendered separately: 1" in report
-    # The legacy row never renders in the schema-3 comparative table.
+    # The legacy row never renders in the schema-4 comparative table.
     lines = report.splitlines()
     idx = lines.index("## Legacy schema-2 measurements (NOT COMPARABLE)")
     assert not any(ln.startswith("| b1-n |") for ln in lines[:idx])

@@ -176,7 +176,7 @@ def test_noop_gets_zero_breakpoint_credit_on_hand_s03():
     )
     score = score_case(case, noop, corrupted, None, TOL)
     dis = score["discontinuities"]
-    assert score["schema_version"] == 3
+    assert score["schema_version"] == 4
     assert dis["jump_threshold_us"] == max(2 * GOOD, 250_000)
     assert dis["true_breakpoints"] == 2
     assert dis["detected_breakpoints"] == 0

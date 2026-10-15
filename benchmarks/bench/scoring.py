@@ -5,8 +5,36 @@ they are NOT calibrated production thresholds. Proposed corrections and
 automatically accepted corrections are scored separately. Clean controls and
 unaffected cues act as negative controls. Denominators are always reported.
 
-Final-timeline semantics (schema_version 3, third-review F06): each score row
-carries ``final_semantics``. For an arm WITH an AcceptanceRecord (b1-va) the
+Whole-cue safety semantics (schema_version 4, sixth-review M1): the aggregate
+cue-safety counters — the altered/unaltered denominators, ``repaired``,
+``worsened_unaltered``, ``harmful_proposed``, the accepted-side ``harmful_*``,
+and ``severe_*`` — are defined on BOTH subtitle boundaries, not onset alone:
+
+* altered: ``abs(injected onset) > good_us`` OR ``abs(injected end) > good_us``;
+* fully repaired: BOTH boundaries restored within ``good_us``;
+* worsened (previously-correct cue): final onset OR final end beyond ``good_us``;
+* harmful: the proposed/accepted result makes either boundary materially
+  (by more than ``good_us``) worse than its corrupted baseline;
+* severe: final onset OR final end beyond ``severe_us``.
+
+Boundary-level detail flags (``repaired_onset_*``/``repaired_end_*``,
+``worsened_onset_*``/``worsened_end_*``, ``harmful_onset_*``/``harmful_end_*``,
+``severe_onset_*``/``severe_end_*`` — per cue and as aggregate counts) keep the
+onset-only and end-only axes independently analyzable, next to the separate
+onset/end ``timing_errors_*`` distributions. Cue-boundary safety is INDEPENDENT
+of the release-discontinuity detector below, which stays onset-anchored:
+isolated changes of subtitle display duration are NOT release-jump evidence.
+Acceptance-region accounting (schema_version 4, sixth-review M2):
+``accepted_regions`` counts ONLY regions from a real ``AcceptanceRecord``;
+unvalidated (tool-only) arms report ``accepted_regions == 0`` with
+``regions_total`` and ``proposed_regions_nonzero`` describing the proposal.
+Schema 3 rows (onset-only aggregate counters; unvalidated arms counting every
+proposed region as ``accepted_regions``) are legacy: reports render them in a
+labeled non-comparative section and never mix them into schema-4 comparisons.
+
+Final-timeline semantics (introduced at schema_version 3, third-review F06;
+unchanged by schema 4): each score row carries ``final_semantics``. For an arm
+WITH an AcceptanceRecord (b1-va) the
 final timeline is the ACTUAL accepted output and counts use the accepted
 names (``accepted_nonzero``, ``harmful_accepted``, ``severe_final``,
 ``repaired``, ``worsened_unaltered``). For an arm WITHOUT any validator
@@ -18,9 +46,11 @@ ran: schema 3 labels those measurements ``*_if_blindly_applied``
 ``worsened_unaltered_if_blindly_applied``). ``*_proposed`` keys remain the
 proposal-domain comparison in both cases. Schema 2 rows (where unguarded
 proposals were counted as "accepted") are legacy: reports label them and
-never mix them into schema-3 comparisons silently.
+never mix them into current (schema-4) comparisons silently.
 
-Discontinuity semantics (schema_version 3):
+Discontinuity semantics (introduced at schema_version 3; UNCHANGED by
+schema_version 4 — cue-boundary safety and release-offset classification are
+separate measurements):
 - Candidate-implied breakpoints come from the candidate's PROPOSED corrections
   only: per-cue applied correction d(cid) = proposed_onset - corrupted_onset
   (no proposal entry -> d = 0); a breakpoint is implied at the ORIGINAL onset
@@ -127,7 +157,7 @@ from .manifests import AcceptanceRecord, CaseManifest, ProposalRecord
 
 BREAK_JUMP_FLOOR_US = 250_000
 OFFSET_RECOVERY_STATUSES = ("1:1-order-preserving", "noop")
-SCORE_SCHEMA_VERSION = 3
+SCORE_SCHEMA_VERSION = 4
 
 # M3 local-correction vs offset-region bounds. These are declared evaluation
 # parameters reported with every result (like Tolerances); they are NOT
@@ -279,7 +309,8 @@ def score_case(
             onset_err_corrupted = c[0] - o[0]
             onset_err_proposed = (p[0] - o[0]) if p else onset_err_corrupted
             onset_err_final = f[0] - o[0]
-            end_err_proposed = (p[1] - o[1]) if p else c[1] - o[1]
+            end_err_corrupted = c[1] - o[1]
+            end_err_proposed = (p[1] - o[1]) if p else end_err_corrupted
             end_err_final = f[1] - o[1]
             rec["onset_err_proposed_us"] = onset_err_proposed
             rec["onset_err_final_us"] = onset_err_final
@@ -289,26 +320,82 @@ def score_case(
             onset_errors_final.append(onset_err_final)
             end_errors_proposed.append(end_err_proposed)
             end_errors_final.append(end_err_final)
-            if abs(injected[0]) > tol.good_us:
+            # Sixth-review M1: WHOLE-CUE safety. A cue is altered when EITHER
+            # injected boundary exceeds good_us; fully repaired only when BOTH
+            # boundaries are restored within good_us; worsened when a
+            # previously-correct cue has EITHER boundary beyond good_us. The
+            # boundary-level *_onset/*_end flags keep each axis independently
+            # analyzable alongside the separate onset/end distributions.
+            onset_altered = abs(injected[0]) > tol.good_us
+            end_altered = abs(injected[1]) > tol.good_us
+            if onset_altered or end_altered:
                 altered.append(cid)
-                if abs(onset_err_final) <= tol.good_us:
+                onset_repaired_f = abs(onset_err_final) <= tol.good_us
+                end_repaired_f = abs(end_err_final) <= tol.good_us
+                if onset_repaired_f:
+                    rec[f"repaired_onset{blind}"] = True
+                if end_repaired_f:
+                    rec[f"repaired_end{blind}"] = True
+                if onset_repaired_f and end_repaired_f:
                     rec[f"repaired{blind}"] = True
-                if abs(onset_err_proposed) <= tol.good_us:
+                onset_repaired_p = abs(onset_err_proposed) <= tol.good_us
+                end_repaired_p = abs(end_err_proposed) <= tol.good_us
+                if onset_repaired_p:
+                    rec["repaired_onset_proposed"] = True
+                if end_repaired_p:
+                    rec["repaired_end_proposed"] = True
+                if onset_repaired_p and end_repaired_p:
                     rec["repaired_proposed"] = True
             else:
                 unaltered.append(cid)
-                if abs(onset_err_final) > tol.good_us:
+                onset_worse_f = abs(onset_err_final) > tol.good_us
+                end_worse_f = abs(end_err_final) > tol.good_us
+                if onset_worse_f:
+                    rec[f"worsened_onset{blind}"] = True
+                if end_worse_f:
+                    rec[f"worsened_end{blind}"] = True
+                if onset_worse_f or end_worse_f:
                     rec[f"worsened{blind}"] = True
-                if abs(onset_err_proposed) > tol.good_us:
+                onset_worse_p = abs(onset_err_proposed) > tol.good_us
+                end_worse_p = abs(end_err_proposed) > tol.good_us
+                if onset_worse_p:
+                    rec["worsened_onset_proposed"] = True
+                if end_worse_p:
+                    rec["worsened_end_proposed"] = True
+                if onset_worse_p or end_worse_p:
                     rec["worsened_proposed"] = True
-            if (
-                p is not None
-                and abs(onset_err_proposed) > abs(onset_err_corrupted) + tol.good_us
-            ):
-                rec["harmful_proposed"] = True
-            if abs(onset_err_final) > abs(onset_err_corrupted) + tol.good_us:
+            # Harmful: EITHER boundary materially worse than its corrupted
+            # baseline (by more than good_us). Proposal axis and accepted/
+            # blind-application axis stay separate (F06).
+            if p is not None:
+                onset_harm_p = (
+                    abs(onset_err_proposed) > abs(onset_err_corrupted) + tol.good_us
+                )
+                end_harm_p = (
+                    abs(end_err_proposed) > abs(end_err_corrupted) + tol.good_us
+                )
+                if onset_harm_p:
+                    rec["harmful_onset_proposed"] = True
+                if end_harm_p:
+                    rec["harmful_end_proposed"] = True
+                if onset_harm_p or end_harm_p:
+                    rec["harmful_proposed"] = True
+            onset_harm_f = abs(onset_err_final) > abs(onset_err_corrupted) + tol.good_us
+            end_harm_f = abs(end_err_final) > abs(end_err_corrupted) + tol.good_us
+            if onset_harm_f:
+                rec[f"harmful_onset_{accepted_label}"] = True
+            if end_harm_f:
+                rec[f"harmful_end_{accepted_label}"] = True
+            if onset_harm_f or end_harm_f:
                 rec[f"harmful_{accepted_label}"] = True
-            if abs(onset_err_final) > tol.severe_us:
+            # Severe: EITHER final boundary beyond severe_us.
+            onset_severe_f = abs(onset_err_final) > tol.severe_us
+            end_severe_f = abs(end_err_final) > tol.severe_us
+            if onset_severe_f:
+                rec[f"severe_onset_{final_label}"] = True
+            if end_severe_f:
+                rec[f"severe_end_{final_label}"] = True
+            if onset_severe_f or end_severe_f:
                 rec[f"severe_{final_label}"] = True
         per_cue[cid] = rec
 
@@ -324,6 +411,9 @@ def score_case(
         if cid in corrupted_times
         and (t[0] != corrupted_times[cid][0] or t[1] != corrupted_times[cid][1])
     )
+
+    def _flagged(key: str) -> int:
+        return sum(1 for r in per_cue.values() if r.get(key))
 
     # Candidate-implied breakpoints: derived from the candidate's own applied
     # corrections (proposed - corrupted), never from residual timing errors.
@@ -661,27 +751,32 @@ def score_case(
         "timing_errors_proposed_end_us": _stats([abs(e) for e in end_errors_proposed]),
         "timing_errors_final_end_us": _stats([abs(e) for e in end_errors_final]),
         "counts": {
-            f"repaired{blind}": sum(
-                1 for r in per_cue.values() if r.get(f"repaired{blind}")
+            # Whole-cue aggregates (sixth-review M1): a cue counts once, with
+            # the boundary-level *_onset/*_end aggregates preserving each
+            # axis's independent detail.
+            f"repaired{blind}": _flagged(f"repaired{blind}"),
+            f"repaired_onset{blind}": _flagged(f"repaired_onset{blind}"),
+            f"repaired_end{blind}": _flagged(f"repaired_end{blind}"),
+            "repaired_proposed": _flagged("repaired_proposed"),
+            "repaired_onset_proposed": _flagged("repaired_onset_proposed"),
+            "repaired_end_proposed": _flagged("repaired_end_proposed"),
+            f"worsened_unaltered{blind}": _flagged(f"worsened{blind}"),
+            f"worsened_unaltered_onset{blind}": _flagged(f"worsened_onset{blind}"),
+            f"worsened_unaltered_end{blind}": _flagged(f"worsened_end{blind}"),
+            "worsened_unaltered_proposed": _flagged("worsened_proposed"),
+            "worsened_unaltered_onset_proposed": _flagged("worsened_onset_proposed"),
+            "worsened_unaltered_end_proposed": _flagged("worsened_end_proposed"),
+            "harmful_proposed": _flagged("harmful_proposed"),
+            "harmful_onset_proposed": _flagged("harmful_onset_proposed"),
+            "harmful_end_proposed": _flagged("harmful_end_proposed"),
+            f"harmful_{accepted_label}": _flagged(f"harmful_{accepted_label}"),
+            f"harmful_onset_{accepted_label}": _flagged(
+                f"harmful_onset_{accepted_label}"
             ),
-            "repaired_proposed": sum(
-                1 for r in per_cue.values() if r.get("repaired_proposed")
-            ),
-            f"worsened_unaltered{blind}": sum(
-                1 for r in per_cue.values() if r.get(f"worsened{blind}")
-            ),
-            "worsened_unaltered_proposed": sum(
-                1 for r in per_cue.values() if r.get("worsened_proposed")
-            ),
-            "harmful_proposed": sum(
-                1 for r in per_cue.values() if r.get("harmful_proposed")
-            ),
-            f"harmful_{accepted_label}": sum(
-                1 for r in per_cue.values() if r.get(f"harmful_{accepted_label}")
-            ),
-            f"severe_{final_label}": sum(
-                1 for r in per_cue.values() if r.get(f"severe_{final_label}")
-            ),
+            f"harmful_end_{accepted_label}": _flagged(f"harmful_end_{accepted_label}"),
+            f"severe_{final_label}": _flagged(f"severe_{final_label}"),
+            f"severe_onset_{final_label}": _flagged(f"severe_onset_{final_label}"),
+            f"severe_end_{final_label}": _flagged(f"severe_end_{final_label}"),
             "proposals_nonzero": nonzero_proposals,
             (
                 "accepted_nonzero" if has_acceptance else "if_blindly_applied_nonzero"
@@ -700,9 +795,14 @@ def score_case(
             )
             else 0,
             "regions_total": len(regions),
-            "accepted_regions": len(acceptance.accepted_regions)
-            if acceptance
-            else len(regions),
+            # Sixth-review M2: proposal-side region accounting stays visible;
+            # the acceptance word "accepted" belongs ONLY to a real
+            # AcceptanceRecord (b1-va). An unvalidated arm proposed regions —
+            # it accepted none.
+            "proposed_regions_nonzero": sum(
+                1 for r in regions if int(r.get("offset_us") or 0) != 0
+            ),
+            "accepted_regions": len(acceptance.accepted_regions) if acceptance else 0,
             "rejected_regions": len(acceptance.rejected_regions) if acceptance else 0,
             "abstention_regions": len(acceptance.abstained_regions)
             if acceptance

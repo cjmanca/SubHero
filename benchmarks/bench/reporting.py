@@ -66,21 +66,31 @@ def build_report(
     artifact_problems: list[tuple[str, str]] | None = None,
     unverified_reasons: dict[str, str] | None = None,
 ) -> str:
-    """Render schema_version-3 scores; schema_version 2 rows are labeled legacy
-    (rendered in a separate non-comparative section); v1 rows are ignored.
+    """Render schema_version-4 scores; schema_version 3 and 2 rows are labeled
+    legacy (each rendered in its own labeled non-comparative section); v1 rows
+    are ignored.
 
-    Schema (third-review F04/F06): current measurements are schema_version 3 —
-    counterfactuals for arms WITHOUT any validator are labeled
-    ``*_if_blindly_applied`` (no safety gate ran), accepted names apply only to
-    arms with an AcceptanceRecord (``final_semantics`` says which), and transient
-    local-cue corrections are reported separately from release discontinuities
-    (``local_cue_adjustments``). schema_version 2 rows (where an unguarded
-    proposal was counted as "accepted") are legacy: never mixed into the
-    comparative tables, only rendered in a labeled legacy section.
+    Schema (sixth-review M1/M2): current measurements are schema_version 4 —
+    the aggregate cue-safety counters (altered/unaltered denominators,
+    repaired, worsened, harmful, severe) are WHOLE-CUE (defined on BOTH
+    boundaries, with onset-only and end-only detail preserved separately), and
+    ``accepted_regions`` counts ONLY regions from a real AcceptanceRecord
+    (unvalidated arms report 0 with ``regions_total``/``proposed_regions_nonzero``
+    describing proposals). schema_version 3 rows (onset-only aggregate counters;
+    unvalidated arms counting every proposed region as accepted_regions) are
+    legacy: never mixed into the comparative tables, only rendered in a
+    labeled legacy section. schema_version 2 rows (where an unguarded
+    proposal was counted as "accepted", third-review F06) are legacy too.
+
+    Schema (third-review F04/F06, retained by schema 4): counterfactuals for
+    arms WITHOUT any validator are labeled ``*_if_blindly_applied`` (no safety
+    gate ran), accepted names apply only to arms with an AcceptanceRecord
+    (``final_semantics`` says which), and transient local-cue corrections are
+    reported separately from release discontinuities (``local_cue_adjustments``).
 
     P1-2 binding: every score row must be bound to a verified run.json in the
     SAME case/candidate whose recorded ``input_fingerprint`` EQUALS the
-    fingerprint embedded in the score. A schema-2 score with no matching
+    fingerprint embedded in the score. A current score with no matching
     fingerprint run (no run.json, a legacy run.json without a fingerprint, a
     fingerprint from a different case generation, or a hand-planted number) is
     DROPPED and counted in ``dropped unbound score rows: N`` so the report never
@@ -133,7 +143,8 @@ def build_report(
     with the schema-appropriate fingerprint-only rule and render ONLY in the
     labeled legacy section.
     """
-    cur = [s for s in scores if isinstance(s, dict) and _schema_of(s) == 3]
+    cur = [s for s in scores if isinstance(s, dict) and _schema_of(s) == 4]
+    legacy3 = [s for s in scores if isinstance(s, dict) and _schema_of(s) == 3]
     legacy2 = [s for s in scores if isinstance(s, dict) and _schema_of(s) == 2]
     scores = cur
     runs = [r for r in runs if isinstance(r, dict)]
@@ -206,6 +217,11 @@ def build_report(
         return bound, dropped
 
     scores, dropped_unbound_cur = _bind(scores)
+    # Sixth-review M1 compatibility: schema-3 rows carry the same byte-binding
+    # requirements (proposal hash + measurement sections) but their aggregate
+    # counters are onset-only — they bind strictly, then render ONLY in the
+    # labeled schema-3 legacy section, never in the schema-4 comparison.
+    legacy3, dropped_unbound_legacy3 = _bind(legacy3)
     # D3 (schema-appropriate binding): schema-2 score rows never carried a
     # proposal_sha256 (that binding arrived with schema 3). Legacy rows bind to
     # a fingerprint-matching run.json (the pre-schema-3 rule) and render ONLY
@@ -220,7 +236,9 @@ def build_report(
         else:
             dropped_unbound_legacy += 1
     legacy2 = legacy_bound
-    dropped_unbound = dropped_unbound_cur + dropped_unbound_legacy
+    dropped_unbound = (
+        dropped_unbound_cur + dropped_unbound_legacy3 + dropped_unbound_legacy
+    )
     # F05: cases whose CURRENT case/source evidence cannot be established are
     # never rendered as comparative rows; their self-consistent historical
     # run/score pairs move to the labeled unverified section (fail-closed).
@@ -247,19 +265,26 @@ def build_report(
     lines.append("")
     lines.append(
         f"dropped unbound score rows: {dropped_unbound} (scores with no "
-        "fingerprint-matching run.json, schema-3 rows missing a proposal hash "
+        "fingerprint-matching run.json, current rows missing a proposal hash "
         "pair, structurally incomplete rows, and planted numbers are never "
         "rendered)"
     )
     lines.append(
-        f"dropped stale-generation rows: {dropped_stale_generation} (schema-3 scores "
+        f"dropped stale-generation rows: {dropped_stale_generation} (schema-4 scores "
         "bound to a run.json whose recorded fingerprint differs from the current "
         "case generation are never rendered)"
     )
     lines.append(
+        f"legacy schema-3 rows rendered separately: {len([s for s in legacy3 if s.get('case_id') not in unverified])} "
+        "(schema 3 drove the aggregate safety counters from onset errors only "
+        "and counted every proposed region as an accepted region for unvalidated "
+        "arms — sixth-review M1/M2 changed both semantics; kept in a labeled "
+        "non-comparative section, never mixed into schema-4 comparisons)"
+    )
+    lines.append(
         f"legacy schema-2 rows rendered separately: {len([s for s in legacy2 if s.get('case_id') not in unverified])} "
         "(schema 2 counted unguarded proposals as 'accepted' — pre-F06 semantics; "
-        "kept in a labeled non-comparative section, never mixed into schema-3 "
+        "kept in a labeled non-comparative section, never mixed into current "
         "comparisons)"
     )
     lines.append(
@@ -311,13 +336,22 @@ def build_report(
             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
         )
         lines.append(
-            "**Column semantics (schema 3):** `Acc validated` = automatically "
-            "accepted nonzero cues from a real AcceptanceRecord (b1-va only); "
-            "`If blind` = unguarded proposal nonzero (counterfactual: what "
-            "blind application would have changed — no validator ran); "
-            "`repaired/worsened` show accepted-side / blindly-applied-side "
-            "counts (`—` where that side does not apply); `final onset err` "
-            "statistics use the arm's final semantics per row below."
+            "**Column semantics (schema 4):** aggregate safety counts are "
+            "WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries "
+            "within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered "
+            "fire on EITHER boundary; `Harmful` compares each boundary against "
+            "its corrupted baseline. Onset-only and end-only detail "
+            "(`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, "
+            "`*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` "
+            "distribution) stays in score.json for independent analysis; the "
+            "median/P90/P95 column is the ONSET axis by label. `Acc validated` "
+            "= automatically accepted nonzero cues from a real AcceptanceRecord "
+            "(b1-va only); `If blind` = unguarded proposal nonzero "
+            "(counterfactual: what blind application would have changed — no "
+            "validator ran); `repaired/worsened` show accepted-side / "
+            "blindly-applied-side counts (`—` where that side does not apply); "
+            "`final onset err` statistics use the arm's final semantics per "
+            "row below."
         )
         lines.append("")
         for s in case_scores:
@@ -362,6 +396,30 @@ def build_report(
                 f"- `{s['candidate_id']}` final timeline = "
                 f"{s.get('final_semantics', 'legacy (schema 2: proposal counted as accepted)')}"
             )
+        # Sixth-review M2: region accounting distinguishes proposals from
+        # validated acceptance wherever regions exist.
+        for s in case_scores:
+            c = s["counts"]
+            total = c.get("regions_total", 0)
+            if not total:
+                continue
+            changed = c.get("proposed_regions_nonzero", 0)
+            if s.get("final_semantics") == "accepted_output":
+                lines.append(
+                    f"- `{s['candidate_id']}` regions: {total} proposed "
+                    f"({changed} with proposed changes); validated acceptance: "
+                    f"{c.get('accepted_regions', 0)} accepted / "
+                    f"{c.get('rejected_regions', 0)} rejected / "
+                    f"{c.get('abstention_regions', 0)} abstained "
+                    "(from the bound AcceptanceRecord)"
+                )
+            else:
+                lines.append(
+                    f"- `{s['candidate_id']}` regions: {total} proposed "
+                    f"({changed} with proposed changes); NO validated acceptance "
+                    f"— accepted regions {c.get('accepted_regions', 0)} "
+                    "(tool-only arm: proposals are not acceptances)"
+                )
         for s in case_scores:
             dis = s["discontinuities"]
             lines.append(
@@ -547,6 +605,34 @@ def build_report(
                 )
         lines.append("")
 
+    legacy3_comparative = [s for s in legacy3 if s.get("case_id") not in unverified]
+    if legacy3_comparative:
+        lines.append("## Legacy schema-3 measurements (NOT COMPARABLE)")
+        lines.append("")
+        lines.append(
+            "**schema_version 3 drove the aggregate cue-safety counters "
+            "(altered/unaltered, repaired, worsened, harmful, severe) from ONSET "
+            "errors only, and counted every proposed region as an accepted "
+            "region for arms with no AcceptanceRecord (sixth-review M1/M2).** "
+            "End-only defects and unvalidated 'accepted' regions are therefore "
+            "incomparable with schema-4 numbers. These rows are preserved as "
+            "recorded history only; do not compare them with schema-4 rows."
+        )
+        lines.append("")
+        for s in legacy3_comparative:
+            c = s.get("counts", {})
+            lines.append(
+                f"- case `{s.get('case_id')}` / `{s.get('candidate_id')}` "
+                f"(schema 3, legacy semantics: proposals_nonzero="
+                f"{c.get('proposals_nonzero', '?')}, repaired="
+                f"{c.get('repaired_if_blindly_applied', c.get('repaired', '?'))}, "
+                f"harmful_accepted={c.get('harmful_accepted', '?')}, "
+                f"accepted_regions={c.get('accepted_regions', '?')} "
+                f"of regions_total={c.get('regions_total', '?')}) — onset-only "
+                "aggregate counters; unvalidated accepted_regions"
+            )
+        lines.append("")
+
     legacy_comparative = [s for s in legacy2 if s.get("case_id") not in unverified]
     if legacy_comparative:
         lines.append("## Legacy schema-2 measurements (NOT COMPARABLE)")
@@ -575,7 +661,10 @@ def build_report(
     tolerance_source = next(
         (
             s
-            for s in list(scores) + list(legacy2) + list(historical_scores)
+            for s in list(scores)
+            + list(legacy3)
+            + list(legacy2)
+            + list(historical_scores)
             if isinstance(s.get("tolerances"), dict)
             and all(
                 _numeric(s["tolerances"].get(k))

@@ -4,9 +4,10 @@
 about real-speech synchronization, and it is not a production threshold. See denominators.
 **Score-number provenance:** comparative rows are admitted only from a directory whose run.json passes the proposal-byte check; the row bullets' recorded input fingerprint and proposal hash are the audit anchors. Numbers fabricated *inside* a score.json that pairs with an admitted, byte-verified run record render as recorded — regenerate score.json with `score` rather than editing it.
 
-dropped unbound score rows: 0 (scores with no fingerprint-matching run.json, schema-3 rows missing a proposal hash pair, structurally incomplete rows, and planted numbers are never rendered)
-dropped stale-generation rows: 0 (schema-3 scores bound to a run.json whose recorded fingerprint differs from the current case generation are never rendered)
-legacy schema-2 rows rendered separately: 0 (schema 2 counted unguarded proposals as 'accepted' — pre-F06 semantics; kept in a labeled non-comparative section, never mixed into schema-3 comparisons)
+dropped unbound score rows: 0 (scores with no fingerprint-matching run.json, current rows missing a proposal hash pair, structurally incomplete rows, and planted numbers are never rendered)
+dropped stale-generation rows: 0 (schema-4 scores bound to a run.json whose recorded fingerprint differs from the current case generation are never rendered)
+legacy schema-3 rows rendered separately: 0 (schema 3 drove the aggregate safety counters from onset errors only and counted every proposed region as an accepted region for unvalidated arms — sixth-review M1/M2 changed both semantics; kept in a labeled non-comparative section, never mixed into schema-4 comparisons)
+legacy schema-2 rows rendered separately: 0 (schema 2 counted unguarded proposals as 'accepted' — pre-F06 semantics; kept in a labeled non-comparative section, never mixed into current comparisons)
 dropped obsolete-acceptance rows: 0 (b1-va scores whose validated base run/proposal no longer matches the current base artifacts are never rendered; re-run the base arm and re-validate)
 dropped tampered/removed proposal rows: 0 (run.json proposal_sha256 no longer matches proposal.json bytes on disk at report time; the run/score pair is never rendered comparably; re-run the arm)
 unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score.json files with no pairing admitted run.json in the same directory, are reported here, never rendered as a number, and do not abort the rest of the report)
@@ -18,7 +19,7 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-fg | 1:1-order-preserving | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 0 ms / 0 ms | 0/0/0 (0) | 0/0 | 24/0/24 |
 | b1-fp | 1:1-order-preserving | 24 | — | 24 | —/0 | —/0 | 0/0/— | 17 ms / 41 ms / 44 ms | 0/0/0 (0) | 0/0 | 24/0/24 |
@@ -37,6 +38,14 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (0 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
@@ -59,7 +68,7 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-fg | 1:1-order-preserving | 24 | — | 24 | —/24 | —/0 | 0/0/— | 0 ms / 0 ms / 0 ms | 0/0/0 (0) | 0/0 | 24/24/0 |
 | b1-fp | 1:1-order-preserving | 24 | — | 24 | —/24 | —/0 | 0/0/— | 18 ms / 43 ms / 46 ms | 0/0/0 (0) | 0/0 | 24/24/0 |
@@ -78,6 +87,14 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (1 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
@@ -108,16 +125,16 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
-| b1-fg | 1:1-order-preserving | 24 | — | 24 | —/1 | —/0 | 0/0/— | 20 ms / 40 ms / 50 ms | 0/0/0 (0) | 0/0 | 24/1/23 |
-| b1-fp | 1:1-order-preserving | 24 | — | 24 | —/1 | —/0 | 0/0/— | 3 ms / 5 ms / 5 ms | 0/0/0 (0) | 0/0 | 24/1/23 |
-| b1-n | noop | 0 | — | 0 | —/0 | —/0 | 0/0/— | 30 ms / 50 ms / 50 ms | 0/0/0 (0) | 0/0 | 24/1/23 |
-| b1-px-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/0 | 0/0/— | 4 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/1/23 |
-| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/0 | 0/0/— | 11 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/1/23 |
-| b1-pxo-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/0 | 0/0/— | 4 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/1/23 |
-| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/0 | 0/0/— | 11 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/1/23 |
-| b1-va | not_run | 15 | 0 | — | 0/— | 0/— | 0/—/0 | 30 ms / 50 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/1/23 |
+| b1-fg | 1:1-order-preserving | 24 | — | 24 | —/2 | —/0 | 0/0/— | 20 ms / 40 ms / 50 ms | 0/0/0 (0) | 0/0 | 24/2/22 |
+| b1-fp | 1:1-order-preserving | 24 | — | 24 | —/2 | —/0 | 0/0/— | 3 ms / 5 ms / 5 ms | 0/0/0 (0) | 0/0 | 24/2/22 |
+| b1-n | noop | 0 | — | 0 | —/0 | —/0 | 0/0/— | 30 ms / 50 ms / 50 ms | 0/0/0 (0) | 0/0 | 24/2/22 |
+| b1-px-fg | 1:1-order-preserving | 15 | — | 15 | —/1 | —/0 | 0/0/— | 4 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/2/22 |
+| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/1 | —/0 | 0/0/— | 11 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/2/22 |
+| b1-pxo-fg | 1:1-order-preserving | 15 | — | 15 | —/1 | —/0 | 0/0/— | 4 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/2/22 |
+| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/1 | —/0 | 0/0/— | 11 ms / 40 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/2/22 |
+| b1-va | not_run | 15 | 0 | — | 0/— | 0/— | 0/—/0 | 30 ms / 50 ms / 50 ms | 0/0/0 (3) | 0/0 | 24/2/22 |
 
 - `b1-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-fp` final timeline = unguarded_proposal_if_blindly_applied
@@ -127,6 +144,14 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (1 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
@@ -149,14 +174,14 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-n | noop | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 8340 ms / 8340 ms | 0/0/0 (0) | 1/1 | 24/5/19 |
-| b1-px-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/4 | 4/4/— | 40 ms / 8281 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
-| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/1 | 1/1/— | 30 ms / 8291 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
-| b1-pxo-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/4 | 4/4/— | 40 ms / 8281 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
-| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/1 | 1/1/— | 30 ms / 8291 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
-| b1-va | not_run | 15 | 0 | — | 0/— | 0/— | 4/—/0 | 0 ms / 8340 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
+| b1-px-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/5 | 5/5/— | 40 ms / 8281 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
+| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/2 | 2/2/— | 30 ms / 8291 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
+| b1-pxo-fg | 1:1-order-preserving | 15 | — | 15 | —/0 | —/5 | 5/5/— | 40 ms / 8281 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
+| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/2 | 2/2/— | 30 ms / 8291 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
+| b1-va | not_run | 15 | 0 | — | 0/— | 0/— | 5/—/0 | 0 ms / 8340 ms / 8340 ms | 0/0/0 (3) | 1/1 | 24/5/19 |
 
 - `b1-n` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-px-fg` final timeline = unguarded_proposal_if_blindly_applied
@@ -164,6 +189,12 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (1 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 1 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 1 of 1 true breakpoints (0 without a straddling cue pair)
 - `b1-px-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 1 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 1 of 1 true breakpoints (0 without a straddling cue pair); 3 local cue adjustments (transient isolated-cue corrections, counted separately, not release discontinuities); 1 track-boundary one-cue correction(s) (isolated edge adjustment vs release-boundary offset ambiguity: claims kept for localization, cues never auto-counted as local, unmatched edge claims 0 recorded explicitly instead of auto-declared false release discontinuities — descriptors in score.json, never silent)
 - `b1-px-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 1 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 1 of 1 true breakpoints (0 without a straddling cue pair); 3 local cue adjustments (transient isolated-cue corrections, counted separately, not release discontinuities); 1 track-boundary one-cue correction(s) (isolated edge adjustment vs release-boundary offset ambiguity: claims kept for localization, cues never auto-counted as local, unmatched edge claims 0 recorded explicitly instead of auto-declared false release discontinuities — descriptors in score.json, never silent)
@@ -184,13 +215,13 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-n | noop | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 3540 ms / 4420 ms | 0/0/0 (0) | 0/0 | 24/5/19 |
 | b1-px-fg | 1:1-order-preserving | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 3540 ms / 4420 ms | 0/0/0 (0) | 0/0 | 24/5/19 |
-| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/2 | 2/2/— | 22 ms / 3540 ms / 4420 ms | 0/0/0 (3) | 0/0 | 24/5/19 |
+| b1-px-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/3 | 3/3/— | 22 ms / 3540 ms / 4420 ms | 0/0/0 (3) | 0/0 | 24/5/19 |
 | b1-pxo-fg | 1:1-order-preserving | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 3540 ms / 4420 ms | 0/0/0 (0) | 0/0 | 24/5/19 |
-| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/2 | 2/2/— | 22 ms / 3540 ms / 4420 ms | 0/0/0 (3) | 0/0 | 24/5/19 |
+| b1-pxo-fp | 1:1-order-preserving | 15 | — | 15 | —/0 | —/3 | 3/3/— | 22 ms / 3540 ms / 4420 ms | 0/0/0 (3) | 0/0 | 24/5/19 |
 | b1-va | not_run | 0 | 0 | — | 0/— | 0/— | 0/—/0 | 0 ms / 3540 ms / 4420 ms | 0/0/0 (0) | 0/0 | 24/5/19 |
 
 - `b1-n` final timeline = unguarded_proposal_if_blindly_applied
@@ -199,6 +230,12 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (0 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-px-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-px-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair); 3 local cue adjustments (transient isolated-cue corrections, counted separately, not release discontinuities); 1 track-boundary one-cue correction(s) (isolated edge adjustment vs release-boundary offset ambiguity: claims kept for localization, cues never auto-counted as local, unmatched edge claims 0 recorded explicitly instead of auto-declared false release discontinuities — descriptors in score.json, never silent)
@@ -219,7 +256,7 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-fg | 1:1-order-preserving | 0 | — | 0 | —/0 | —/0 | 0/0/— | 0 ms / 0 ms / 0 ms | 0/0/0 (0) | 0/0 | 24/0/24 |
 | b1-fp | 1:1-order-preserving | 24 | — | 24 | —/0 | —/0 | 0/0/— | 17 ms / 41 ms / 44 ms | 0/0/0 (0) | 0/0 | 24/0/24 |
@@ -238,6 +275,14 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-pxo-fg` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-pxo-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-px-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fg` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-pxo-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-va` regions: 1 proposed (0 with proposed changes); validated acceptance: 0 accepted / 0 rejected / 0 abstained (from the bound AcceptanceRecord)
 - `b1-fg` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-fp` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
@@ -260,7 +305,7 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 
 | Candidate | Status | Proposals | Acc validated | If blind | Repaired acc/blind | Worsened acc/blind | Harmful prop/blind/acc | Median/P90/P95 final onset err | Breaks implied/matched/false+ (local adj) | Breaks unresolved/true | Denominator (cues: total/altered/unaltered) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-**Column semantics (schema 3):** `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
+**Column semantics (schema 4):** aggregate safety counts are WHOLE-CUE (sixth-review M1): `Repaired` requires BOTH boundaries within tolerance; `Worsened`/`Harmful`/denominator altered/unaltered fire on EITHER boundary; `Harmful` compares each boundary against its corrupted baseline. Onset-only and end-only detail (`repaired_onset/end_*`, `harmful_onset/end_*`, `severe_onset/end_*`, `*_unaltered_onset/end_*` flags and the `timing_errors_*_end_us` distribution) stays in score.json for independent analysis; the median/P90/P95 column is the ONSET axis by label. `Acc validated` = automatically accepted nonzero cues from a real AcceptanceRecord (b1-va only); `If blind` = unguarded proposal nonzero (counterfactual: what blind application would have changed — no validator ran); `repaired/worsened` show accepted-side / blindly-applied-side counts (`—` where that side does not apply); `final onset err` statistics use the arm's final semantics per row below.
 
 | b1-fp | 1:1-order-preserving | 5 | — | 5 | —/0 | —/0 | 5/5/— | 3636 ms / 4703 ms / 4703 ms | 4/0/4 (0) | 0/0 | 5/5/0 |
 | b1-n | noop | 0 | — | 0 | —/0 | —/0 | 0/0/— | 1490 ms / 1490 ms / 1490 ms | 0/0/0 (0) | 0/0 | 5/5/0 |
@@ -269,6 +314,8 @@ unreadable artifacts skipped: 0 (run/score JSON that cannot be parsed, and score
 - `b1-fp` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-n` final timeline = unguarded_proposal_if_blindly_applied
 - `b1-va` final timeline = accepted_output
+- `b1-fp` regions: 1 proposed (1 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
+- `b1-n` regions: 1 proposed (0 with proposed changes); NO validated acceptance — accepted regions 0 (tool-only arm: proposals are not acceptances)
 - `b1-fp` discontinuities: candidate-implied breakpoints 4 (matched 0 of 0 true, false-positive 4, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-n` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
 - `b1-va` discontinuities: candidate-implied breakpoints 0 (matched 0 of 0 true, false-positive 0, ambiguous 0, jump threshold 250 ms); final timeline still discontinuous at 0 of 0 true breakpoints (0 without a straddling cue pair)
