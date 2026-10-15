@@ -102,7 +102,9 @@ def _registry(root: Path, source_id: str) -> dict:
     return data["sources"][source_id]
 
 
-def _register_synthetic_relative(root: Path, source_id: str) -> None:
+def _register_synthetic_relative(
+    root: Path, source_id: str, track_id: str = "episode"
+) -> None:
     """Register Fx00 with README-style relative paths, CWD = checkout repo root."""
     rc = cli.main(
         [
@@ -115,9 +117,9 @@ def _register_synthetic_relative(root: Path, source_id: str) -> None:
             "--source-id",
             source_id,
             "--subtitle",
-            "episode=sidecar:benchmarks/fixtures/Fx00/episode.ass",
+            f"{track_id}=sidecar:benchmarks/fixtures/Fx00/episode.ass",
             "--gold",
-            "episode=benchmarks/fixtures/Fx00/gold_episode.json",
+            f"{track_id}=benchmarks/fixtures/Fx00/gold_episode.json",
             "--rights",
             SYNTH,
         ]
@@ -316,11 +318,13 @@ def test_case_prepare_run_score_stable_from_different_cwd(
 @pytest.mark.skipif(FFMPEG is None, reason="ffmpeg required for reference audio")
 def test_committed_fixture_case_manifest_is_byte_stable(tmp_path, monkeypatch, capsys):
     """`case prepare` from the repo root still writes the committed root-relative
-    manifest fields (no absolute private paths enter a committed-path manifest)."""
+    manifest fields (no absolute private paths enter a committed-path manifest).
+    Uses the canonical registered track id `main` (M1: manifests persist the
+    registered id, never a path stem)."""
     co = _make_checkout(tmp_path)
     root = _point_cli_at_checkout(monkeypatch, co)
     monkeypatch.chdir(co)
-    _register_synthetic_relative(root, "Fx00")
+    _register_synthetic_relative(root, "Fx00", track_id="main")
     capsys.readouterr()
     rc = cli.main(
         [
@@ -331,7 +335,7 @@ def test_committed_fixture_case_manifest_is_byte_stable(tmp_path, monkeypatch, c
             "--source-id",
             "Fx00",
             "--track-id",
-            "episode",
+            "main",
             "--scenario",
             "S00",
             "--seed",
