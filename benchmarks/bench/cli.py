@@ -356,7 +356,26 @@ def _verify_sources(
     source_id: str,
     sources: dict,
     case: CaseManifest | None = None,
+    hash_cache: dict[str, str] | None = None,
 ) -> list[str]:
+    """Verify registered media, registered sidecars, and (when given) the case's
+    generated input against the recorded fingerprints.
+
+    ``hash_cache`` is an optional per-invocation-chain memo (path -> sha256) so a
+    single report generation never hashes the same full episode once per case;
+    callers without a cache keep the previous exact behavior.
+    """
+
+    def _hashed(p: Path) -> str:
+        if hash_cache is None:
+            return sha256_file(p)
+        key = str(p.resolve())
+        cached = hash_cache.get(key)
+        if cached is None:
+            cached = sha256_file(p)
+            hash_cache[key] = cached
+        return cached
+
     problems: list[str] = []
     s = sources["sources"].get(source_id)
     if s is None:
@@ -379,7 +398,7 @@ def _verify_sources(
                 f"source {source_id} registry record has no media_sha256; "
                 "re-register the source"
             )
-        elif sha256_file(media) != recorded_media:
+        elif _hashed(media) != recorded_media:
             problems.append("SOURCE MUTATION DETECTED: media fingerprint changed")
     for track_id, spec in s.get("subtitle_specs", {}).items():
         recorded = s.get("subtitle_sha256", {}).get(track_id)
@@ -387,7 +406,7 @@ def _verify_sources(
             p = Path(spec.removeprefix("sidecar:"))
             if not p.is_file():
                 problems.append(f"registered subtitle {track_id} missing")
-            elif sha256_file(p) != recorded:
+            elif _hashed(p) != recorded:
                 problems.append(
                     f"SOURCE MUTATION DETECTED: subtitle {track_id} fingerprint changed"
                 )
@@ -395,7 +414,7 @@ def _verify_sources(
         generated = _resolve_generated(paths, case)
         if not generated.is_file():
             problems.append("generated corrupted file missing from scratch")
-        elif sha256_file(generated) != case.generated_subtitle_sha256:
+        elif _hashed(generated) != case.generated_subtitle_sha256:
             problems.append("case input no longer matches case manifest fingerprint")
     return problems
 
@@ -1602,7 +1621,12 @@ def cmd_score(args, paths) -> int:
     return rc
 
 
-def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
+def _case_evidence_missing(
+    paths: dict[str, Path],
+    case_id: str,
+    sources: dict | None = None,
+    hash_cache: dict[str, str] | None = None,
+) -> bool:
     """True when present-day case manifest + registered source cannot be established.
 
     M1: a manifest not coherent with the registry (track_id unregistered/stem-
@@ -1610,6 +1634,13 @@ def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
     gold target that disagrees with the named track's registered gold) counts
     as missing current evidence (fail-closed), so the report renders its rows
     only in the labeled unverified-historical section, never comparably.
+
+    Fifth-review M1: missing current evidence ALSO covers file integrity —
+    registered media missing/mutated, registered sidecars mutated, and a
+    generated case input that no longer matches the case manifest fingerprint
+    (the same `_verify_sources` checks run/score enforce). A self-consistent
+    run/score pair whose underlying input files changed must never present as
+    current comparative results.
     """
     case_path = _lookup_case_path(paths, case_id)
     if case_path is None:
@@ -1618,11 +1649,14 @@ def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
         case = _load_case(case_path)
     except (OSError, ValueError):
         return True
-    sources = _load_sources(paths["sources"])
+    if sources is None:
+        sources = _load_sources(paths["sources"])
     source = sources["sources"].get(case.source_id)
     if source is None:
         return True
-    return bool(_track_identity_reason(case, source, paths))
+    if _track_identity_reason(case, source, paths):
+        return True
+    return bool(_verify_sources(paths, case.source_id, sources, case, hash_cache))
 
 
 def cmd_report(args, paths) -> int:
@@ -1635,9 +1669,15 @@ def cmd_report(args, paths) -> int:
     )
     sources = _load_sources(paths["sources"])
     current_fingerprints: dict[tuple, str] = {}
+    # Fifth-review M1: one hash memo for the whole report generation so the
+    # registered media of a shared source is hashed AT MOST ONCE per report,
+    # while every case still gets its real-file integrity verification.
+    source_hash_cache: dict[str, str] = {}
     acceptance_stale: list[tuple[str, str]] = []
     proposal_stale: list[tuple[str, str]] = []
     artifact_problems: list[tuple[str, str]] = []
+    unverified_cases: list[str] = []
+    unverified_reasons: dict[str, str] = {}
     admitted_pairs: set[tuple] = set()
     runs, scores, versions = [], [], {}
     for case_id in case_ids:
@@ -1670,8 +1710,37 @@ def cmd_report(args, paths) -> int:
             if case is not None and source is not None
             else ""
         )
+        # Fifth-review M1: report generation performs the SAME source-integrity
+        # verification that `run` and `score` enforce (registered media exists and
+        # matches its recorded fingerprint, registered sidecars still match, the
+        # generated case input matches the manifest hash). Identity coherence is
+        # checked FIRST (M1 policy: nothing is hashed from an incoherent
+        # binding); when it passes, the live files are verified against the
+        # registry/manifest fingerprints via the shared per-report memo.
+        integrity_problems = (
+            _verify_sources(paths, case.source_id, sources, case, source_hash_cache)
+            if case is not None and source is not None and not identity_problem
+            else []
+        )
         gold_sha = _gold_content_sha256(paths, case) if case is not None else None
-        evidence_missing = case is None or source is None or bool(identity_problem)
+        evidence_missing = (
+            case is None
+            or source is None
+            or bool(identity_problem)
+            or bool(integrity_problems)
+        )
+        if evidence_missing:
+            unverified_cases.append(case_id)
+            if case is None:
+                unverified_reasons[case_id] = "case manifest missing/unreadable"
+            elif source is None:
+                unverified_reasons[case_id] = (
+                    f"registered source {case.source_id} no longer present"
+                )
+            elif identity_problem:
+                unverified_reasons[case_id] = identity_problem
+            else:
+                unverified_reasons[case_id] = "; ".join(integrity_problems)
         for d in (
             (paths["results"] / case_id).iterdir()
             if (paths["results"] / case_id).exists()
@@ -1864,7 +1933,10 @@ def cmd_report(args, paths) -> int:
                         )
                     else:
                         scores.append(sc)
-    unverified_cases = [cid for cid in case_ids if _case_evidence_missing(paths, cid)]
+    # Fifth-review M1: `unverified_cases`/`unverified_reasons` were collected in
+    # the admission loop above (manifest+registry load, track-identity
+    # coherence, and live source/generated-file integrity — the same checks
+    # `run`/`score` enforce, with a per-report hash memo). No second pass.
     text = build_report(
         list(case_ids),
         runs,
@@ -1875,6 +1947,7 @@ def cmd_report(args, paths) -> int:
         unverified_cases,
         proposal_stale,
         artifact_problems,
+        unverified_reasons,
     )
     out = Path(args.out) if args.out else paths["results"] / "report.md"
     try:

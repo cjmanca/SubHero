@@ -64,6 +64,7 @@ def build_report(
     unverified_cases: list[str] | None = None,
     proposal_stale: list[tuple[str, str]] | None = None,
     artifact_problems: list[tuple[str, str]] | None = None,
+    unverified_reasons: dict[str, str] | None = None,
 ) -> str:
     """Render schema_version-3 scores; schema_version 2 rows are labeled legacy
     (rendered in a separate non-comparative section); v1 rows are ignored.
@@ -113,6 +114,14 @@ def build_report(
     themselves as current is exactly this finding); they appear ONLY in the
     separate, explicitly labeled *Unverified historical results* section,
     marked as not comparable.
+
+    Fifth-review M1: report generation runs the same source-integrity
+    verification as ``run``/``score`` (registered media and sidecars exist and
+    match their recorded fingerprints; the generated case input matches the
+    manifest hash). A case whose live input files no longer verify is added to
+    ``unverified_cases`` like any other missing current evidence, and
+    ``unverified_reasons`` (case_id -> reason) states WHY under the labeled
+    section.
 
     Report-path integrity closures (adversarial review round 1):
     ``proposal_stale`` lists ``(case_id, reason)`` for arms whose
@@ -380,6 +389,18 @@ def build_report(
                     if dis.get("ambiguous_offset_regions", 0)
                     else ""
                 )
+                + (
+                    f"; {dis['edge_ambiguous_regions']} track-boundary "
+                    "one-cue correction(s) (isolated edge adjustment vs "
+                    "release-boundary offset ambiguity: claims kept for "
+                    "localization, cues never auto-counted as local, "
+                    f"unmatched edge claims {dis.get('unmatched_edge_ambiguous_claims', 0)} "
+                    "recorded explicitly instead of auto-declared false "
+                    "release discontinuities — descriptors in score.json, "
+                    "never silent)"
+                    if dis.get("edge_ambiguous_regions", 0)
+                    else ""
+                )
             )
         for s in case_scores:
             dis = s["discontinuities"]
@@ -503,6 +524,13 @@ def build_report(
             "any comparison, decision, or acceptance."
         )
         lines.append("")
+        reasons = dict(unverified_reasons or {})
+        for cid in sorted(unverified):
+            reason = reasons.get(cid)
+            if reason:
+                lines.append(f"- case `{cid}`: {reason[:300]}")
+        if any(reasons.get(cid) for cid in unverified):
+            lines.append("")
         for s in historical_scores:
             te = s.get("timing_errors_final_us", {})
             lines.append(
