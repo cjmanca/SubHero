@@ -13,8 +13,15 @@ python -m pip install ffsubsync pysubs2 numpy pytest ruff
 ```
 
 Requirements observed in development: Python 3.14, `ffmpeg`/`ffprobe` on PATH,
-`ffsubsync` 0.5.1 (advertises `--split-penalty`). ALASS is not installed in this
-environment, so the `b1-al` arm reports `unsupported` (an honest state, never a fabricated score).
+`ffsubsync` 0.5.1 (advertises `--split-penalty`). **ALASS 2.0.0 installed 2026-10-15**
+from the official `kaegi/alass` v2.0.0 Windows release (`alass-windows64.zip`, 26,444,109 B,
+SHA-256 `e81a72f97f592910e909a2352d6b8c0de0801c51ac1383bad4ebf3f2ecdd2fd8`), kept **outside**
+the repository: `alass.exe` plus its bundled `av-*.dll` dependencies in a PATH directory
+(the release names the binary `alass-cli.exe`, and detection is `shutil.which("alass")`,
+so the binary must be named `alass` with the DLLs co-located; the full tree with LICENSE
+sits beside it). When the binary is absent the `b1-al` arm reports `unsupported`
+(an honest state, never a fabricated score). Cosmetic: the version probe uses ffsubsync's
+`-v` convention, so `tool_versions.alass` records clap's unknown-flag line (clap takes `-V`).
 
 Run from the repository root:
 
@@ -107,7 +114,7 @@ spec is **refused**: ffmpeg `-map 0:s:<n>` counts subtitle streams while
 | `b1-n` | No-op baseline | cost/no-regression reference |
 | `b1-fg` | ffsubsync global | timing proposals extracted from tool output only |
 | `b1-fp` | ffsubsync piecewise | passes `--split-penalty 5`; capability probed from installed version |
-| `b1-al` | ALASS | positional CLI; `unsupported` when binary absent |
+| `b1-al` | ALASS | positional CLI; `unsupported` when binary absent (installed: 2.0.0 official Windows release, executed 2026-10-15) |
 | `b1-px-fg` / `b1-px-fp` | dialogue-only proxy + ffsubsync | **heuristic-only anchor classification** (karaoke/music/style/brackets); gold cue labels are never supplied to these arms; cue-ID map recorded; anchorless tracks abstain |
 | `b1-pxo-fg` / `b1-pxo-fp` | **Oracle-assisted DIAGNOSTIC**: dialogue proxy using **GOLD cue labels** + ffsubsync | upper-bound reference only: anchor selection comes from the benchmark's own gold annotations; every proposal/run record carries an explicit `oracle-assisted diagnostic arm` marker; **excluded from `--all`** and from default candidates; select explicitly (`--candidate b1-pxo-fg`) |
 | `b1-va` | targeted-ASR validation | validates a base arm's proposals; `not_run` without a configured local ASR endpoint (and cross-language samples abstain — `not_run` if that is the only evidence — without a configured `BENCH_SEM_VERIFY_*` semantic verifier; lexical score never decides cross-language pairs) |
@@ -277,7 +284,8 @@ ruff check benchmarks
 ruff format --check benchmarks
 ```
 
-Current observed state: 151 tests pass; `ruff check` clean; `ruff format --check` clean.
+Current observed state: 341 tests pass (observed 2026-10-15; suite grew through the review
+remediations); `ruff check` clean; `ruff format --check` clean.
 
 ## Scope boundaries
 
