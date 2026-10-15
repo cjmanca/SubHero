@@ -1,99 +1,214 @@
-# SubHero — Third review and bounded Qwen remediation handoff
+# Assignment: Correct Three Remaining Benchmark Issues
 
-**Repository:** https://github.com/cjmanca/SubHero  
-**Reviewed branch/HEAD:** `main` / `d4da5d6698497c5f1ecedfa60b1f9f068777b43e` (2026-10-14)  
-**Comparison baseline:** `bdb937fc4a0d846920a2072724975cb88feecc49`  
-**Review method:** Read-only GitHub source review of the 13 intervening commits, relevant benchmark modules, tests, and project ledger. The reviewer could not clone the repository in the execution environment and **did not run its actual test suite, FFmpeg benchmark matrix, or a live inference endpoint**. The project's ledger reports 222 passing tests and clean Ruff checks; that is project-reported evidence, not an independently executed check. A minimal reproduction of the isolated-cue discontinuity-counting issue was run independently against the code's documented formula.
+**Repository:** `cjmanca/SubHero`
+**Reviewed commit:** `4c7fe16697244847e5b8cb762e930f2769c18819`
 
-## Disposition
+## Objective
 
-The previous remediation has substantially addressed its requested fixes: private media have a Git-ignored home, audio streams are explicitly selected, cross-language comparisons are routed to semantic verification, candidate output mapping is more conservative, and the prior gap-at-breakpoint scoring bug has been addressed. **Do not begin evidence-based G1 algorithm selection yet.** Four remaining benchmark-validity defects can distort the results, followed by three narrower reporting/evidence problems. This is a **corrective assignment only**, not authorization to develop B2–B5 or the production application.
+Correct three benchmark-validity problems identified during the fourth independent code review.
 
-Follow `AGENTS.md` and `ORCHESTRATION.md`. Use this as a new, separately approved bounded plan; **do not silently edit the previous frozen `PLAN.md`** or mark work accepted before checks run. Only the main orchestrator owns plan/version approval and `STATUS.md`. Preserve private media and synthetic fixture evidence.
+The previous remediation is substantially complete. Preserve those corrections.
 
-## Blocking findings
+**Do not expand into B2–B5 or build production application infrastructure.**
 
-### F01 — P1: A B1-VA acceptance is not invalidated when its base proposal changes
+Follow `AGENTS.md` and the applicable orchestration policies. Keep approved `PLAN.md` versions immutable during execution. Only the main orchestrator manages `STATUS.md`.
 
-**Source:** `benchmarks/bench/cli.py` `_acceptance_binding_problem()` (~446–530), `cmd_run()` (~1020–1105), `cmd_score()` (~1108–1215); `benchmarks/bench/fingerprint.py` (~26–73).
+Read the relevant benchmark specifications and safety invariants before implementation.
 
-`b1-va/run.json` records `validated_candidate_id` and `base_proposal_sha256`, but `_acceptance_binding_problem()` checks only its own acceptance hash and the *name* of the validated base arm. It does **not** verify the current base-arm proposal's checksum, base run generation/fingerprint, or the verifier/ASR configuration that produced the acceptance. The B1-VA `input_fingerprint` is calculated with `tool_versions={}` and has no dependency on base proposal bytes, CLI sample seed, language hints, model identity, verifier choice, or prompt/settings. As a result:
+---
 
-1. Run a base candidate and B1-VA on a case.
-2. Rerun that base candidate with different candidate settings or results, keeping the case unchanged.
-3. Score `b1-va` without rerunning the validator. The old acceptance can still pass the own-run hash and identity checks and be scored as if it validated the new proposal.
+## Milestone 1 — Preserve Subtitle-Track Identity
 
-Similarly, changing `--base-candidate`, `--seed`, `--language`, `--subtitle-language`, or local ASR/semantic models can leave a current-looking yet obsolete acceptance artifact. This defeats the purpose of the previous stale-result remediation.
+**Priority: P1**
 
-**Required fix:** Make the accepted-result identity depend on the exact validated base **run and proposal**, including hashes, and on the validation input configuration (sampling seed, resolved language identities, ASR/verifier model IDs/revisions/settings; no credentials). At `score` and `report`, reject or clearly exclude an acceptance that no longer matches the current base. Don't compare only the base candidate *name*. On a base rerun, either proactively invalidate downstream artifacts or enforce the dependency check at read time.
+### Problem
 
-**Focused regressions:** base result A → validate → base result B (same case) → B1-VA `score` refuses; unchanged base continues to score; different validation seed/model/language cannot be mislabeled as the same experiment. A deletion of stale `score.json` must not remove legitimate current results.
+In `benchmarks/bench/corrupt.py`, `prepare_case()` currently assigns:
 
-### F02 — P1: The input fingerprint omits ground truth and oracle input material
+`CaseManifest.track_id = source_track_path.stem`
 
-**Source:** `benchmarks/bench/fingerprint.py` `fingerprint_payload()` (~26–59); `benchmarks/bench/cli.py` `cmd_score()` (~1108–1215).
+However, the source registry identifies subtitle tracks using the user-supplied identifier.
 
-The declared fingerprint contract says it binds the injected ground truth to a case generation, but its `case` payload omits `original_times_us`, `injected_cue_deltas`, `expected_inverse`, `transform`, and `grid_us`/format; it also omits oracle gold-classification **content** and subtitle-source identity. These inputs can change the score or oracle anchor selection without changing the fingerprint. For example, edit an original onset in a private `.case.json` but leave the seed/params/subtitle SHA unchanged: the same `input_fingerprint` still matches, while the apparent timing-error result changes. Likewise, changing gold cue labels can change a `b1-pxo-*` candidate's behavior without invalidating its cached proposal.
+For example:
 
-**Required fix:** Version the fingerprint contract and bind the **canonical semantic case inputs**, actual ground-truth annotation revision/hash, selected subtitle input identity, and any oracle-only labels by content hash. Don't include mutable output locations or secrets. Ensure the binding is checked consistently in `run`, `score`, B1-VA dependencies, and `report`. Historical score rows with old fingerprints must not be silently mixed into new comparisons.
+```text
+Registered:
+  main=sidecar:episode.ass
 
-**Focused regressions:** modify a private case's gold timing or injected deltas while keeping its corrupted subtitle bytes unchanged → stale scores rejected; modify the oracle cue classification file → its dependent arm must rerun; a genuine unchanged case remains cacheable.
+Requested:
+  --track-id main
 
-### F03 — P1: Targeted semantic verification does not prove *where* matching speech occurs
+Stored in case manifest:
+  track_id = episode
+```
 
-**Source:** `benchmarks/bench/validator.py` `PAD_US` (~51), `validate_proposal()` (~332–570), especially audio extraction (~471–477), and verifier verdict acceptance (~418–464).
+This creates inconsistencies between the source registry and case manifests.
 
-The validator extracts the **entire proposed cue interval plus 1.5 s on each side**, transcribes the whole window into one text string, then asks whether the subtitle matches that transcript. There is no word/utterance timestamp, speaker/segment association, or evidence that the matching words occurred **inside the proposed subtitle interval** rather than in the padding. With close adjacent lines or repeated dialogue, a wrongly shifted cue can therefore be accepted because its actual line is *nearby*, even if not spoken when proposed. Multiple matching samples can all share this systematic error. This contradicts the benchmark's requirement to verify the *specific timed utterance*, not just its presence nearby.
+Consequences include incorrect subtitle-language resolution, incorrect source-track lookup, and incomplete fingerprint protection.
 
-**Required fix:** Distinguish `semantic_content_present_in_window` from `timing_correspondence_verified`. Only automatically accept a synchronization region where time-local evidence connects the matching utterance to the proposed interval, with a documented tolerance. Evaluate whether the targeted ASR backend provides usable segment timestamps or whether a bounded aligner can be used; if not, abstain on ambiguous multi-utterance windows rather than promoting a text-only match to timing proof. Keep this a B1-targeted experiment, not an implementation of the full B2 ASR pipeline.
+The existing basename-alias workaround doesn't fully resolve the underlying issue.
 
-**Focused regressions:** two distinct adjacent dialogue lines; repeat one line in the padding but outside the proposed interval; wrong shift whose padded transcript still contains the subtitle text. The validator must not accept solely because an ASR transcript of the enlarged window contains that text. Include a correctly localized positive control.
+### Required changes
 
-### F04 — P1: A perfect isolated-cue repair scores as false *release* discontinuities
+1. Pass the explicitly registered track ID to `prepare_case()`.
+2. Preserve that identifier throughout the benchmark pipeline.
+3. Use it consistently for subtitle-language lookup, source fingerprints, gold annotations, and candidate identity.
+4. Remove unnecessary basename aliases.
+5. Handle existing case manifests deliberately rather than silently reinterpreting their identities.
 
-**Source:** `benchmarks/bench/scoring.py` `score_case()` (~200–295). **Scenario:** `S04` in `benchmarks/bench/corrupt.py`.
+### Required regression tests
 
-`score_case()` infers every change in adjacent cues' *applied corrections* to be a candidate release discontinuity. For a perfectly corrected S04 case with one isolated cue shifted by +2 s in the corrupted source, the ideal correction deltas are `[0, -2 s, 0]`. This produces **two** inferred breakpoints from the scorer, even though `S04` has **zero** release-edit breakpoints. The scorer records two false-positive discontinuities for a correct local repair. The result is an invalid comparison between local cue repair and global/piecewise timeline mapping. The current tests cover the S04 *no-op* case, not the perfect isolated repair.
+Register two subtitle tracks with different IDs but identical filenames in different directories.
 
-**Required fix:** Separate *local isolated cue corrections* from sustained timeline-offset change points in the discontinuity metric. Use stable support on each side, or classify a short transient-and-reversal as a local correction with an explicit `local_cue_adjustments` measure. Preserve proper penalties for real spurious **regional** discontinuities, and retain the prior gap-aware and one-to-one breakpoint credit behavior.
+Verify that their case manifests preserve the correct IDs and their source identities remain distinct.
 
-**Focused regressions:** a perfect S04 isolated-cue repair has zero release-break false positives and correct cue-repair credit; a spurious lasting step in S00 has a false-positive release breakpoint; a correct S03 step across a cue-free gap keeps its credit.
+Also test changing a registered subtitle source while retaining the same media and audio. Previously generated candidate results must be invalidated rather than silently reused.
 
-## Additional issues to address within this bounded correction
+### Acceptance
 
-### F05 — P2: `report` can present stale results when current case/source evidence is missing
+Every prepared case unambiguously identifies the subtitle track selected during registration.
 
-**Source:** `benchmarks/bench/cli.py` `cmd_report()` (~1217–1272) and `benchmarks/bench/reporting.py` `build_report()` (~14–100).
+---
 
-`cmd_report` explicitly skips recomputing the current fingerprint when the case manifest or registered source cannot be loaded, and calls `build_report` anyway. A self-consistent old `run.json`/`score.json` pair can consequently appear in `report --case OLD` despite missing present-day evidence. This is a **fail-open** path in a benchmark that otherwise refuses to score unverifiable results.
+## Milestone 2 — Correct Cross-Language Timing Ambiguity
 
-**Fix/check:** If current case/source identity cannot be established, refuse to render scored rows or explicitly label them unverified historical results in a separate, non-comparative section. Do not silently treat them as current. Test deletion/invalidity of source registry and case manifest after a valid score pair.
+**Priority: P1**
 
-### F06 — P2: Proposed corrections are reported as already “accepted” without any validator
+### Problem
 
-**Source:** `benchmarks/bench/scoring.py` (~120–125, ~177–197, output `counts`) and `benchmarks/bench/reporting.py` (~115–151).
+The previous timing-validation correction introduced a distinction between matching speech inside the proposed subtitle interval and matching speech in surrounding padding.
 
-When no `AcceptanceRecord` is supplied, `final_times` defaults to the raw proposed times. Hence a tool-only ffsubsync/ALASS result can have `accepted_nonzero` and `harmful_accepted` counts even though no automatic acceptance decision took place. Scoring hypothetical *blind application* is useful, but the label “accepted” implies safety-gated authorization that did not happen.
+The same-language validator checks for matching dialogue in both locations and abstains when the occurrence is ambiguous.
 
-**Fix/check:** Retain counterfactual raw-proposal/hypothetical-apply comparisons, but display them under explicit names such as `if_blindly_applied` or `unguarded_proposal`, separately from B1-VA verified accepted changes. Document whether `final` means “candidate output” or “actual accepted output” per arm. Add one focused tool-only result test and one B1-VA result test.
+**The cross-language path doesn't perform the equivalent ambiguity check.**
 
-### F07 — P2: Semantic-verifier time is charged as ASR time
+In `benchmarks/bench/validator.py`, the cross-language branch sends the overlapping segment text to the semantic verifier.
 
-**Source:** `benchmarks/bench/validator.py` `run_verifier()` (~418–465), specifically `asr_seconds += sv.seconds` (~435); `benchmarks/bench/cli.py` B1-VA `run.json` (~1070–1106).
+If the verifier returns `match`, the validator treats the timing correspondence as verified.
 
-The validator adds semantic-verifier inference duration into `asr_seconds`, while `asr_calls` still counts only transcription calls. This inflates the reported ASR runtime and prevents fair component-cost comparisons.
+However, the same utterance might also appear in the surrounding padding.
 
-**Fix/check:** Record ASR and semantic-verification wall time/call counts separately, and optionally a combined end-to-end inference time. Keep existing result fields backward-readable and label the revised metrics accurately. Test with fake transcriber and verifier returning known distinct durations.
+### Example
 
-## Bounded remediation and acceptance sequence
+English subtitle:
 
-1. **Validity/provenance:** F01 and F02 together. Choose one versioned binding contract, not several competing cache mechanisms. Verify real read-time invalidation and clean reruns; avoid a new database.
-2. **Temporal verification:** F03. Establish honest `match-at-time` versus `text-found-near-time` evidence. Do not add a full ASR/forced-aligner architecture just for a benchmark. If timing evidence is unavailable, abstention is the correct measured outcome.
-3. **Scoring/reporting:** F04–F07. Keep old measurement formats explicitly legacy or migrate them deliberately; do not recompute historical reports silently. Make terminology of candidate proposals versus accepted corrections unambiguous.
-4. **Review/verification:** Add **only focused tests** for each reproduced failure; run `python -m pytest benchmarks/tests -q`, `ruff check benchmarks`, `ruff format --check benchmarks`, and `git diff --check`. Independently review the diff for source-media safety, private artifacts, score correctness, and stale-output protection. Keep `Fx00` committed as the redistributable *plumbing* fixture; do not claim real-media efficacy from its tone-burst synthetic audio. Use genuine tool/model runs for measured claims.
+> I will protect this city.
 
-### Required final handoff
+Japanese dialogue:
 
-Report: changed paths; exact checks run and results; a small reproducible before/after example for each blocking finding; any limitations; whether old runs must be discarded/recreated; one next action. Update the existing benchmark findings and experiment registry only with observed evidence. Preserve the previous immutable plan and the orchestrator-owned status policy; no pushes, production media writes, or private episode publication.
+* 00:10 — `この街は私が守る`
+* 00:12 — `この街は私が守る`
 
-**G0/G1 remain pending real known-good episodes.** After these fixes, register E01 Japanese ASS and E02 Mandarin with the selected original-language audio from `benchmarks/private/` (ignored except its README) or outside the repo via read-only mounts, verify the clean timing controls, and then execute the measured synchronization matrix. No production thresholds or algorithm winner should be declared before that.
+The subtitle is proposed for the first occurrence.
+
+If both occurrences appear in the sampled window, the validator must recognize that the repeated dialogue creates ambiguity rather than assuming the first match establishes the intended correspondence.
+
+### Required changes
+
+1. Evaluate whether matching original-language dialogue occurs both inside the proposed interval and in the padding.
+2. Use bounded additional semantic verification when necessary.
+3. Abstain when multiple occurrences cannot be distinguished.
+4. Preserve automatic acceptance for genuinely unambiguous matches.
+5. Do not reject valid translations merely because their words differ from the source-language transcript.
+
+Also review cases where an ASR segment spans both the proposed interval and its padding.
+
+A broad segment containing several utterances must not automatically establish the precise timing of one particular utterance.
+
+### Required regression tests
+
+Cover correctly positioned translated dialogue, matching dialogue only in padding, repeated matching dialogue both inside and outside the proposed interval, unrelated dialogue in padding, and an overly broad ASR segment crossing the interval boundary.
+
+### Acceptance
+
+Cross-language timing validation requires unambiguous evidence that the matching utterance occurred at the proposed time.
+
+---
+
+## Milestone 3 — Distinguish Local Repairs from Reversible Release Offsets
+
+**Priority: P1**
+
+### Problem
+
+The previous discontinuity-scoring correction identifies local cue adjustments by detecting offset sequences of the form:
+
+```text
+A → B → A
+```
+
+This works when a single subtitle has an incorrect timestamp.
+
+However, the implementation does not adequately distinguish a short isolated correction from a genuine release-specific offset region.
+
+For example:
+
+```text
+Cues 001–030:    Offset  0s
+Cues 031–230:    Offset -2s
+Cues 231–260:    Offset  0s
+```
+
+This represents two potentially genuine release discontinuities affecting a 200-cue region.
+
+The current scoring logic can classify the entire middle section as a local adjustment because its offset eventually returns to the original value.
+
+Both genuine discontinuities are then excluded from detection scoring.
+
+### Required changes
+
+1. Distinguish short local corrections from sustained offset regions.
+2. Consider cue count, temporal duration, and supporting neighboring anchors.
+3. Do not classify a region as local solely because its offset eventually returns to a previous value.
+4. Preserve the existing gap-aware breakpoint matching behavior.
+5. Represent inherently ambiguous short regions conservatively.
+6. Continue measuring actual timing recovery independently from inferred release-breakpoint classification.
+
+Ground-truth annotations may be used by the scorer to evaluate correctness, but must never leak into ordinary algorithm candidates.
+
+### Required regression tests
+
+**Test A — Isolated error:** One cue incorrectly shifted and perfectly repaired. Expected: local adjustment, no false release discontinuities.
+
+**Test B — Genuine reversible offset:** A long middle section with a different offset and two real release discontinuities. Expected: both discontinuities recognized.
+
+**Test C — Spurious regional shift:** A candidate introduces a sustained A→B→A shift into previously correct subtitles. Expected: harmful correction appropriately penalized.
+
+**Test D — Sparse dialogue:** Preserve the previously corrected gap-aware scoring behavior.
+
+### Acceptance
+
+A perfectly repaired long release-specific region must not lose discontinuity-detection credit merely because its offset eventually returns to the original value.
+
+---
+
+## Final Verification
+
+After implementation:
+
+1. Run focused regression tests for each finding.
+2. Run the existing benchmark test suite and configured Ruff checks.
+3. Inspect the complete diff.
+4. Perform a distinct read-only adversarial review.
+5. Revalidate candidate fingerprints and regenerate affected synthetic benchmark artifacts where necessary.
+6. Update benchmark findings using only genuinely executed measurements.
+
+Keep testing proportional to the affected behavior. Avoid adding unnecessary infrastructure or large numbers of redundant tests.
+
+### Safety requirements
+
+Original media must remain read-only.
+
+All private episodes, subtitle files, extracted audio, transcripts, annotations, generated cases, and benchmark results must remain Git-ignored.
+
+Preserve the existing `benchmarks/private/` protection.
+
+Do not push, publish, deploy, or begin production-media modification.
+
+### Completion requirements
+
+Report the changed files, actual test commands and results, remaining limitations, and the final review findings.
+
+Do not claim G0/G1 success without real-media validation.
+
+**After these corrections, the next milestone should be G0/G1 real-episode synchronization benchmarking using known-good Japanese and Mandarin episodes.**
