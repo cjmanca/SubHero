@@ -7,6 +7,7 @@ Run `python -m bench [--help]` from the `benchmarks/` directory, or
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -399,31 +400,109 @@ def _verify_sources(
     return problems
 
 
-def _unregistered_track_reason(case: CaseManifest, source: dict) -> str:
-    """Return a refusal reason when the case manifest's track id is not a
-    registered subtitle-track id of the source record; the empty string when
-    it is.
+def _track_identity_reason(
+    case: CaseManifest, source: dict, paths: dict[str, Path]
+) -> str:
+    """Return a refusal reason when a loaded case manifest is not coherent
+    with the registry record of its source; the empty string when it is.
 
     M1 identity policy: ``CaseManifest.track_id`` is the registered track id.
-    Pre-fix manifests persisted the sidecar **file stem**, which is not a
-    registry key whenever the registered id differs (e.g. ``main=sidecar:
-    episode.ass`` persisted ``episode``). Such on-disk manifests are handled
-    DELIBERATELY: every consumer of a loaded manifest (run, score, report)
-    checks the identity against ``source["subtitle_specs"]`` FIRST and refuses
-    with an actionable re-prepare message. The identity is never silently
-    reinterpreted, and a registry lookup returning ``None`` is never hashed
-    into a fingerprint as a valid subtitle binding.
+    Registry MEMBERSHIP alone is not identity — the manifest's recorded source
+    evidence must belong to the track it names. Every consumer of a loaded
+    manifest (run, score, report, evidence-missing) applies these checks
+    BEFORE any fingerprint, gold, audio, scoring, or candidate work:
+
+    1. ``case.track_id`` must be a key of ``source["subtitle_specs"]``.
+       Pre-fix stem manifests persist the sidecar file stem, which is not a
+       registry key whenever the registered id differs (e.g. ``main=sidecar:
+       episode.ass`` persisted ``episode``); they are handled DELIBERATELY.
+    2. Sidecar tracks: ``cmd_source_add`` records the sidecar file's sha256
+       under ``subtitle_sha256[track_id]`` at registration, and
+       ``prepare_case`` persists the hash of the exact source file it
+       corrupted as ``case.original_subtitle_sha256``. A manifest whose
+       ``track_id`` names a SIBLING registered track (membership passes) is
+       caught: the recorded ground-truth hash must equal the named track's
+       registered hash. A sidecar spec with no recorded hash is an unbound
+       registry record (re-register required). MKV-extracted tracks have NO
+       ``subtitle_sha256`` entry (registration records only sidecar hashes) —
+       their identity is the stream-index spec plus the extraction run, so the
+       hash-coherence check intentionally applies only where the registry
+       records a hash.
+    3. Gold coherence: ``source["gold_classification"]`` is keyed by
+       registered track id. Manifest and registry must agree for the named
+       track: manifest names a gold ⇒ the track must have one at the same
+       resolved path (manifest paths are root-relative when under the root,
+       registry paths are absolute — compare after resolving the manifest
+       path against the root); the track has a registered gold ⇒ the manifest
+       must name one. No gold on either side imposes no requirement.
+
+    Nothing is ever silently reinterpreted, and a registry lookup returning
+    ``None`` is never hashed into a fingerprint as a valid subtitle binding.
     """
     specs = source.get("subtitle_specs")
-    if isinstance(specs, dict) and case.track_id in specs:
-        return ""
-    return (
-        f"case manifest track_id {case.track_id!r} is not registered for source "
-        f"{case.source_id}; the manifest predates registered-track-id case "
-        f"preparation. Re-prepare the case: case prepare --source-id "
-        f"{case.source_id} --track-id <registered track id> (see: source inspect "
-        f"--source-id {case.source_id})"
-    )
+    if not (isinstance(specs, dict) and case.track_id in specs):
+        return (
+            f"case manifest track_id {case.track_id!r} is not registered for "
+            f"source {case.source_id}; the manifest predates registered-track-id "
+            f"case preparation. Re-prepare the case: case prepare --source-id "
+            f"{case.source_id} --track-id <registered track id> (see: source "
+            f"inspect --source-id {case.source_id})"
+        )
+    spec = specs[case.track_id]
+    if isinstance(spec, str) and spec.startswith("sidecar:"):
+        recorded = (source.get("subtitle_sha256") or {}).get(case.track_id)
+        if not recorded:
+            return (
+                f"source {case.source_id} registry record has no "
+                f"subtitle_sha256 for sidecar track {case.track_id!r}; the "
+                f"subtitle source identity is unbound. Re-register the source "
+                f"(source add --source-id {case.source_id} ...), then "
+                f"re-prepare the case"
+            )
+        if recorded != case.original_subtitle_sha256:
+            return (
+                f"case manifest original_subtitle_sha256 "
+                f"{str(case.original_subtitle_sha256)[:16]}… does not match "
+                f"the registered subtitle_sha256 {str(recorded)[:16]}… of "
+                f"track {case.track_id!r}; the manifest is bound to a "
+                f"different subtitle source (track_id swapped to a sibling "
+                f"track?). Re-prepare the case: case prepare --source-id "
+                f"{case.source_id} --track-id <the registered track the "
+                f"corrupted file was derived from> (see: source inspect "
+                f"--source-id {case.source_id})"
+            )
+    registry_gold = (source.get("gold_classification") or {}).get(case.track_id)
+    manifest_gold = case.gold_classification_path
+    if manifest_gold and not registry_gold:
+        return (
+            f"case manifest names gold_classification_path {manifest_gold!r}, "
+            f"but track {case.track_id!r} has no registered gold "
+            f"classification for source {case.source_id}; re-prepare the "
+            f"case: case prepare --source-id {case.source_id} --track-id "
+            f"{case.track_id}"
+        )
+    if registry_gold and not manifest_gold:
+        return (
+            f"track {case.track_id!r} has a registered gold classification "
+            f"for source {case.source_id}, but the case manifest names none; "
+            f"the gold identity is unbound; re-prepare the case: case "
+            f"prepare --source-id {case.source_id} --track-id {case.track_id}"
+        )
+    if manifest_gold and registry_gold:
+        manifest_resolved = os.path.normcase(
+            str(_resolve_under_root(paths, manifest_gold).resolve())
+        )
+        registry_resolved = os.path.normcase(str(Path(registry_gold).resolve()))
+        if manifest_resolved != registry_resolved:
+            return (
+                f"case manifest gold_classification_path {manifest_gold!r} "
+                f"resolves to {_resolve_under_root(paths, manifest_gold)}, "
+                f"which is not the registered gold classification "
+                f"{registry_gold} of track {case.track_id!r} (manifest names "
+                f"a sibling track's gold?); re-prepare the case: case prepare "
+                f"--source-id {case.source_id} --track-id {case.track_id}"
+            )
+    return ""
 
 
 def _gold_content_sha256(paths: dict[str, Path], case: CaseManifest) -> str | None:
@@ -1172,10 +1251,12 @@ def cmd_run(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
-        # M1 fail-closed: a manifest whose track_id is not a registered track id
-        # (pre-fix stem-based manifest) is refused BEFORE any fingerprint, gold,
-        # audio, or candidate work — never silently reinterpreted.
-        identity = _unregistered_track_reason(case, source)
+        # M1 fail-closed: a manifest not coherent with the registry (stem-based
+        # pre-fix track_id, unregistered id, SIBLING-track swap whose recorded
+        # source hash/gold target does not belong to the named track) is refused
+        # BEFORE any fingerprint, gold, audio, or candidate work — never
+        # silently reinterpreted.
+        identity = _track_identity_reason(case, source, paths)
         if identity:
             print(f"REFUSED ({case_id}): {identity}", file=sys.stderr)
             rc = 2
@@ -1408,10 +1489,11 @@ def cmd_score(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
-        # M1 fail-closed: refuse a stem-based (pre-fix) manifest whose track_id
-        # is not registered BEFORE provenance checks, fingerprint recomputation,
-        # scoring, or stale-score deletion.
-        identity = _unregistered_track_reason(case, source)
+        # M1 fail-closed: refuse a manifest not coherent with the registry
+        # (stem-based pre-fix track_id, unregistered id, sibling-track swap:
+        # sidecar source-hash/gold-target mismatch) BEFORE provenance checks,
+        # fingerprint recomputation, scoring, or stale-score deletion.
+        identity = _track_identity_reason(case, source, paths)
         if identity:
             print(f"REFUSED ({case_id}): {identity}", file=sys.stderr)
             return 2
@@ -1523,9 +1605,11 @@ def cmd_score(args, paths) -> int:
 def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
     """True when present-day case manifest + registered source cannot be established.
 
-    M1: a manifest whose track_id is not registered for its source counts as
-    missing current evidence (fail-closed), so the report renders its rows only
-    in the labeled unverified-historical section, never comparably.
+    M1: a manifest not coherent with the registry (track_id unregistered/stem-
+    based, sibling-track swap with a non-matching sidecar source hash, or a
+    gold target that disagrees with the named track's registered gold) counts
+    as missing current evidence (fail-closed), so the report renders its rows
+    only in the labeled unverified-historical section, never comparably.
     """
     case_path = _lookup_case_path(paths, case_id)
     if case_path is None:
@@ -1538,7 +1622,7 @@ def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
     source = sources["sources"].get(case.source_id)
     if source is None:
         return True
-    return bool(_unregistered_track_reason(case, source))
+    return bool(_track_identity_reason(case, source, paths))
 
 
 def cmd_report(args, paths) -> int:
@@ -1574,13 +1658,15 @@ def cmd_report(args, paths) -> int:
             except (OSError, ValueError):
                 case = None
         source = sources["sources"].get(case.source_id) if case is not None else None
-        # M1 fail-closed: an unregistered manifest track id means the current
-        # case/source identity cannot be established; the fingerprint (which
-        # binds the subtitle spec/sha via case.track_id) is NEVER computed from
-        # a registry lookup that returns None. The case's rows fall through the
-        # F05 unverified-historical path instead.
+        # M1 fail-closed: a manifest not coherent with the registry (stem-
+        # based/unregistered track id, sibling-track swap: non-matching sidecar
+        # source hash, disagreeing gold target) means the current case/source
+        # identity cannot be established; the fingerprint (which binds the
+        # subtitle spec/sha via case.track_id) is NEVER computed from an
+        # incoherent binding. The case's rows fall through the F05
+        # unverified-historical path instead.
         identity_problem = (
-            _unregistered_track_reason(case, source)
+            _track_identity_reason(case, source, paths)
             if case is not None and source is not None
             else ""
         )

@@ -10,12 +10,24 @@ Regression coverage for the track-identity corrective benchmark:
   bindings are per-track.
 * ``subtitle_languages`` is keyed ONLY by registered track ids (no stem
   aliases).
+* Manifest/registry COHERENCE is fail-closed (P2-1 sibling-track-swap
+  closure): beyond registry membership, a sidecar manifest's recorded
+  ``original_subtitle_sha256`` must equal the named track's registered
+  ``subtitle_sha256``, and the manifest's gold target must match the named
+  track's registered gold. A hand-edited manifest swapping ``track_id`` to a
+  sibling registered track refuses at run/score (rc 2, actionable
+  re-prepare) and never renders a comparative report row. MKV-extracted
+  tracks (registry records no hash for them) are unaffected.
 * Pre-fix stem-based manifests on disk fail closed at run/score with an
   actionable re-prepare message (never silently reinterpreted), and never
   render as comparative report rows.
 * Re-registering the subtitle source at the same track id with a changed
   subtitle file (same media and audio) invalidates previously generated
-  candidate results through the fingerprint, at score time, end to end.
+  candidate results: the manifest is no longer coherent with the registry, so
+  run/score refuse (rc 2, actionable re-prepare), the report never renders the
+  obsolete number comparably, and re-prepare + re-run restores the pipeline.
+  (The version-2 fingerprint independently binds the subtitle spec/sha, so a
+  persisted proposal from the old generation can never be silently reused.)
 """
 
 from __future__ import annotations
@@ -537,21 +549,281 @@ def test_changed_registered_subtitle_invalidates_prior_candidate_results(
         == 0
     )
 
-    # The prior generation's score must be refused (STALE), not silently reused.
+    # The prior generation's manifest is no longer coherent with the registry
+    # (its recorded ground-truth hash belongs to the de-registered file): the
+    # coherence guard refuses at score (rc 2, re-prepare) BEFORE any reuse;
+    # the stale number is never scored and never renders comparably.
     rc = _score(root, "M1SUB")
     captured = capsys.readouterr()
-    assert rc == RC_STALE
-    assert "STALE" in captured.err
-    assert not (d / "score.json").exists()
+    assert rc == RC_IDENTITY
+    assert "does not match" in captured.err
+    assert "prepare the case" in captured.err.lower()
 
     rc, report = _report(root, "M1SUB")
     assert rc == 0
     assert "| b1-n |" not in report  # the obsolete number never renders comparably
+    assert "Unverified historical" in report
 
-    # Re-running the candidate against the current subtitle binding restores scoring.
+    # Re-preparing against the current subtitle source restores the pipeline.
+    assert _prepare(root, "M1SUB", "main") == 0
     assert _run(root, "M1SUB") == 0
     assert _score(root, "M1SUB") == 0
     assert (d / "score.json").is_file()
     rc, report = _report(root, "M1SUB")
     assert rc == 0
     assert "| b1-n |" in report
+    assert "Unverified historical" not in report
+
+
+# ---------------------------------------------------------------------------
+# 5. P2-1 sibling-track-swap coherence: membership is not identity
+# ---------------------------------------------------------------------------
+
+
+def _cli_add_synth(root: Path, media: Path, extra: tuple[str, ...]) -> int:
+    """Synthetic-rights registration (media/sidecar/gold in the fixtures home)."""
+    return cli.main(
+        [
+            "--root",
+            str(root),
+            "source",
+            "add",
+            "--path",
+            str(media),
+            "--source-id",
+            "MS",
+            "--rights",
+            cli.SYNTHETIC_RIGHTS,
+            *extra,
+        ]
+    )
+
+
+def _register_swap_source(
+    tmp_path: Path,
+    fixture_dir: Path,
+    main2_same_file: bool = False,
+    gold_main2: bool = True,
+) -> Path:
+    """Source with two registered sidecar tracks: main (episode+gold) and main2.
+
+    Synthetic rights: the media/sidecars/gold live in the committed fixtures
+    home (read-only). With ``main2_same_file`` the sibling points at the SAME
+    sidecar file (byte-identical registered hash, so the hash-coherence check
+    passes and only the gold-coherence check can catch a swap)."""
+    media = fixture_dir / "reference.wav"
+    root = tmp_path / "benchroot"
+    main2_side = fixture_dir / ("episode.ass" if main2_same_file else "signs.ass")
+    extra = [
+        "--subtitle",
+        f"main=sidecar:{fixture_dir / 'episode.ass'}",
+        "--subtitle",
+        f"main2=sidecar:{main2_side}",
+        "--subtitle-language",
+        "main=eng",
+        "--subtitle-language",
+        "main2=kor",
+        "--gold",
+        f"main={fixture_dir / 'gold_episode.json'}",
+    ]
+    if gold_main2:
+        extra += ["--gold", f"main2={fixture_dir / 'gold_signs.json'}"]
+    assert _cli_add_synth(root, media, tuple(extra)) == 0
+    return root
+
+
+def _swap_manifest_track(root: Path, case_id: str, new_track: str) -> None:
+    manifest_path = cli._lookup_case_path(cli._paths(root), case_id)
+    assert manifest_path is not None
+    manifest = read_json(manifest_path)
+    manifest["track_id"] = new_track
+    write_json(manifest_path, manifest)
+
+
+@requires_ffmpeg
+def test_sibling_track_swap_refused_at_run_and_score(tmp_path, fixture_dir, capsys):
+    """Hand-edited manifest swapping main -> main2 (BOTH registered) must refuse:
+    the recorded ground-truth hash belongs to main, not to main2."""
+    root = _register_swap_source(tmp_path, fixture_dir)
+    assert _prepare(root, "M1SWAP", "main") == 0
+    assert _run(root, "M1SWAP") == 0
+    assert _score(root, "M1SWAP") == 0
+    capsys.readouterr()
+    rc, report = _report(root, "M1SWAP")
+    assert rc == 0
+    assert "## Case `M1SWAP`" in report  # positive control: legitimate case is fine
+    fp_before = _load(_cand_dir(root, "M1SWAP", "b1-n") / "run.json")[
+        "input_fingerprint"
+    ]
+
+    _swap_manifest_track(root, "M1SWAP", "main2")
+    capsys.readouterr()
+
+    rc = _run(root, "M1SWAP")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "main2" in captured.err
+    assert "does not match" in captured.err
+    assert "prepare the case" in captured.err.lower()
+    # refused before the fingerprint: the recorded run identity is untouched
+    assert (
+        _load(_cand_dir(root, "M1SWAP", "b1-n") / "run.json")["input_fingerprint"]
+        == fp_before
+    )
+
+    rc = _score(root, "M1SWAP")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "does not match" in captured.err
+    assert "prepare the case" in captured.err.lower()
+
+    rc, report = _report(root, "M1SWAP")
+    assert rc == 0
+    assert "## Case `M1SWAP`" not in report  # never a comparative row
+    assert "Unverified historical" in report
+
+
+@requires_ffmpeg
+def test_sibling_gold_swap_refused_at_run_and_score(tmp_path, fixture_dir, capsys):
+    """Byte-identical sibling sidecar (hash coherence passes) must still be caught
+    by gold coherence: main2 has NO registered gold while the manifest names main's."""
+    root = _register_swap_source(
+        tmp_path, fixture_dir, main2_same_file=True, gold_main2=False
+    )
+    assert _prepare(root, "M1GSW", "main") == 0
+    assert _run(root, "M1GSW") == 0
+    assert _score(root, "M1GSW") == 0
+    capsys.readouterr()
+
+    _swap_manifest_track(root, "M1GSW", "main2")
+    capsys.readouterr()
+
+    rc = _run(root, "M1GSW")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "no registered gold" in captured.err
+    assert "main2" in captured.err
+    assert "prepare the case" in captured.err.lower()
+
+    rc = _score(root, "M1GSW")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "no registered gold" in captured.err
+
+
+@requires_ffmpeg
+def test_manifest_dropping_registered_gold_is_refused(tmp_path, fixture_dir, capsys):
+    """Manifest with the gold target deleted while its track HAS a registered gold
+    is incoherent: fail closed, never a gold-less rescoring."""
+    root = _register_swap_source(tmp_path, fixture_dir)
+    assert _prepare(root, "M1GDN", "main") == 0
+    assert _run(root, "M1GDN") == 0
+    assert _score(root, "M1GDN") == 0
+    manifest_path = cli._lookup_case_path(cli._paths(root), "M1GDN")
+    manifest = read_json(manifest_path)
+    assert manifest["gold_classification_path"] is not None
+    manifest["gold_classification_path"] = None
+    write_json(manifest_path, manifest)
+    capsys.readouterr()
+
+    rc = _run(root, "M1GDN")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "names none" in captured.err
+    assert "prepare the case" in captured.err.lower()
+    rc = _score(root, "M1GDN")
+    captured = capsys.readouterr()
+    assert rc == RC_IDENTITY
+    assert "names none" in captured.err
+
+
+@requires_ffmpeg
+def test_sibling_track_with_own_gold_pair_prepares_and_scores(
+    tmp_path, fixture_dir, capsys
+):
+    """Positive control: a legitimately prepared main2 case (its own sidecar hash +
+    its own registered gold) passes the coherence guard and scores."""
+    root = _register_swap_source(tmp_path, fixture_dir)
+    assert _prepare(root, "M1OK2", "main2", scenario="S01", seed=3) == 0
+    assert _run(root, "M1OK2") == 0
+    assert _score(root, "M1OK2") == 0
+    capsys.readouterr()
+    rc, report = _report(root, "M1OK2")
+    assert rc == 0
+    assert "## Case `M1OK2`" in report
+    assert "Unverified historical" not in report
+
+
+def _build_mkv_with_subtitle(tmp_path: Path) -> Path:
+    """One eng audio stream + one eng embedded ass subtitle stream."""
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(exist_ok=True)
+    out = media_dir / "subbed.mkv"
+    a880 = tmp_path / "sub-880.wav"
+    srt = tmp_path / "subs.srt"
+    _ffmpeg(
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=880:duration=6",
+        "-c:a",
+        "pcm_s16le",
+        str(a880),
+    )
+    srt.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nLine one\n\n"
+        "2\n00:00:03,000 --> 00:00:04,000\nLine two\n\n"
+        "3\n00:00:05,000 --> 00:00:06,000\nLine three\n",
+        encoding="utf-8",
+    )
+    _ffmpeg(
+        "-i",
+        str(a880),
+        "-i",
+        str(srt),
+        "-map",
+        "0:a:0",
+        "-map",
+        "1:0",
+        "-c:a",
+        "pcm_s16le",
+        "-c:s",
+        "ass",
+        "-metadata:s:a:0",
+        "language=eng",
+        "-metadata:s:s:0",
+        "language=eng",
+        str(out),
+    )
+    return out
+
+
+@requires_ffmpeg
+def test_mkv_extracted_track_unaffected_by_hash_coherence(tmp_path, capsys):
+    """MKV-extracted tracks have NO registry subtitle_sha256 (identity is the
+    stream-index spec); the sidecar hash-coherence guard must not break them."""
+    media = _build_mkv_with_subtitle(tmp_path)
+    root = tmp_path / "benchroot"
+    assert (
+        _cli_add(
+            root,
+            media,
+            (
+                "--subtitle",
+                "sub=mkv:lang:eng",
+            ),
+        )
+        == 0
+    )
+    record = _record(root)
+    assert record["subtitle_specs"]["sub"].startswith("mkv:")
+    assert "sub" not in record.get("subtitle_sha256", {})
+    # S00 control: the point is the coherence guard path, not an injection
+    assert _prepare(root, "M1MKV", "sub", scenario="S00", seed=1) == 0
+    assert _run(root, "M1MKV") == 0
+    assert _score(root, "M1MKV") == 0
+    capsys.readouterr()
+    rc, report = _report(root, "M1MKV")
+    assert rc == 0
+    assert "## Case `M1MKV`" in report
+    assert "Unverified historical" not in report

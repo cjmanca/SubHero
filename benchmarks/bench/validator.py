@@ -80,6 +80,18 @@ that crosses the interval boundary into the padding mixes in-interval with
 past-interval speech and is NOT precise time-local evidence for one utterance: a
 match supported only by such a broad segment abstains (``broad_segment_matches``)
 instead of auto-accepting.
+
+Timing-evidence parity across language paths (P2-2, fifth review): the precise
+in-interval evidence requirement applies on EVERY language path. The same-language
+lexical accept is decided from ``in_precise_ratio`` (match over PRECISE segments
+only), never from the combined overlap ratio, so a boundary-crossing broad segment
+can no longer lend accept support to a same-language pair the way it was barred
+from doing so cross-language. A broad-only overlap (no precise segment) is CONTENT
+evidence, never precise timing proof: it ABSTAINS as ``broad_segment_matches``
+(recording content-present) on the lexical path too, and it is never a
+contradiction-reject — the same-language reject remains reachable only when NO
+window segment (precise, broad, or padding) matches the subtitle at all.
+Acceptance quality therefore never depends on which language path fired (F07).
 """
 
 from __future__ import annotations
@@ -469,6 +481,12 @@ def _segment_timing(
     diluted by being joined against unrelated in-interval speech. Text
     normalization for that comparison is ``_dup_normalize`` (whitespace/
     punctuation/full-half-width neutralized).
+
+    ``in_precise_ratio`` is the join-pattern match over PRECISE segments only
+    (the accept-evidence ratio, M2-2); ``in_ratio`` is the combined overlap
+    (precise ∪ broad) ratio used only to detect CONTENT presence — a broad
+    segment must never lend accept support. The cross-language path gates the
+    same way via ``n_precise_overlap > 0``.
     """
     overlap: list[dict] = []
     padding: list[dict] = []
@@ -497,11 +515,22 @@ def _segment_timing(
     if len(overlap) > 1:
         in_cands.append(overlap)
         in_cands += [overlap[i : i + 2] for i in range(len(overlap) - 1)]
+    # M2-2 (fifth review) P2-2: accept evidence comes from PRECISE segments only.
+    # ``in_ratio`` is the combined overlap (precise ∪ broad) ratio, kept for
+    # detecting that broad text is CONTENT-present; ``in_precise_ratio`` mirrors
+    # the join pattern over PRECISE segments so a boundary-crossing broad segment
+    # can never lend accept support on its own (accept-parity with the
+    # cross-language path, which already requires n_precise_overlap > 0).
+    precise_cands: list[list[dict]] = [[s] for s in precise]
+    if len(precise) > 1:
+        precise_cands.append(precise)
+        precise_cands += [precise[i : i + 2] for i in range(len(precise) - 1)]
     pad_cands: list[list[dict]] = [[s] for s in padding]
     if len(padding) > 1:
         pad_cands.append(padding)
     return {
         "in_ratio": best(in_cands) if in_cands else 0.0,
+        "in_precise_ratio": best(precise_cands) if precise_cands else 0.0,
         "padding_ratio": best(pad_cands) if pad_cands else 0.0,
         "n_overlap": len(overlap),
         "overlap_text": " ".join(s["text"] for s in overlap),
@@ -608,9 +637,21 @@ def validate_proposal(
     indistinguishable competitor, a probe with no usable verdict, a competitor
     count over the cap, or a broad boundary-crossing segment as the sole
     time-local source all abstain, never accept, so cross-language acceptance
-    requires unambiguous evidence that the matching utterance occurred at the
-    proposed time. Genuinely unique in-interval matches keep the single-call
-    accept.
+     requires unambiguous evidence that the matching utterance occurred at the
+     proposed time. Genuinely unique in-interval matches keep the single-call
+     accept.
+
+     P2-2 (fifth review) enforces the SAME precise-evidence parity on the
+     same-language lexical path: automatic acceptance is decided from
+     ``in_precise_ratio`` (PRECISE segments only), never from the combined
+     overlap ratio, so a boundary-crossing broad segment can no longer lend
+     accept support the way it was already barred from doing cross-language. A
+     broad-only overlap is content evidence, never precise timing proof: it
+     abstains as ``broad_segment_matches`` (recording content-present) and is
+     never a contradiction-reject — the same-language reject stays reachable only
+     when NO window segment (precise, broad, or padding) matches at all.
+     Acceptance quality never depends on which language path fired.
+
 
     ``language`` is the resolved spoken/audio language hint and
     ``subtitle_language`` the resolved target-subtitle hint (defaults to "und"
@@ -986,15 +1027,21 @@ def validate_proposal(
                 "timing_correspondence_verified; abstained\n"
             )
         elif (
-            timing["in_ratio"] >= MIN_MATCH_RATIO
+            timing["n_precise_overlap"] > 0
+            and timing["in_precise_ratio"] >= MIN_MATCH_RATIO
             and timing["padding_ratio"] < MIN_MATCH_RATIO
         ):
-            # F03: a matching utterance overlaps the proposed interval within
-            # the documented tolerance and NO padding-only match competes for
-            # the same text: timing correspondence verified -> accept.
+            # M2-2 (fifth review): a PRECISE in-interval utterance (whole span
+            # inside the tolerant interval) matches and NO padding match
+            # competes for the same text -> timing correspondence verified ->
+            # accept. A boundary-crossing broad segment can never lend accept
+            # support (accept-parity with the cross-language path).
             verdicts.setdefault(region, []).append("accept")
-        elif timing["in_ratio"] >= MIN_MATCH_RATIO:
-            # Matches BOTH in-interval and in padding: repeated/adjacent
+        elif (
+            timing["n_precise_overlap"] > 0
+            and timing["in_precise_ratio"] >= MIN_MATCH_RATIO
+        ):
+            # Matches PRECISE in-interval AND in padding: repeated/adjacent
             # dialogue makes the position ambiguous; abstain, keep original.
             verdicts.setdefault(region, []).append("abstain")
             multi_utterance_ambiguity += 1
@@ -1002,6 +1049,22 @@ def validate_proposal(
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                 f"{cid}: matching utterances in the proposed interval AND in "
                 "the window padding; position ambiguous; abstained\n"
+            )
+        elif timing["in_ratio"] >= MIN_MATCH_RATIO:
+            # M2-2: the overlap matches only via a BROAD boundary-crossing
+            # segment (no precise accept evidence). Broad text is CONTENT
+            # evidence, never precise time-local proof, and it is NOT a
+            # contradiction: abstain (never accept, never reject), recording
+            # content-present, on EVERY language path.
+            verdicts.setdefault(region, []).append("abstain")
+            broad_segment_matches += 1
+            region_content_present[region] = True
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: a broad ASR segment crosses the proposed interval "
+                "boundary and mixes in-interval with past-interval speech; it "
+                "does not localize the matched utterance "
+                "(semantic_content_present_in_window, timing correspondence "
+                "unverified); abstained\n"
             )
         elif timing["padding_ratio"] >= MIN_MATCH_RATIO:
             # The matching line is spoken only in the 1.5 s padding outside
@@ -1018,9 +1081,12 @@ def validate_proposal(
             )
         elif same_identity:
             # Verified same-language pair with usable reliability and segment
-            # evidence: NO utterance in the window (in-interval or padding)
-            # matches the subtitle text -> genuine CONTRADICTION evidence.
+            # evidence: NO utterance in the window (precise, broad, or padding)
+            # matches the subtitle text -> genuine CONTRADICTION evidence. A
+            # broad-segment match is content-present (handled above), so a
+            # broad-only match never reaches this reject.
             verdicts.setdefault(region, []).append("reject")
+
         elif verifier is not None:
             # Identity not verified: low overlap is NOT sufficient negative
             # evidence. Route to the verifier when configured (never reject on an
@@ -1158,11 +1224,12 @@ def validate_proposal(
         )
     if broad_segment_matches:
         notes_parts.append(
-            f"{broad_segment_matches} cross-language samples: the verifier match "
-            "rested on a broad ASR segment crossing the proposed-interval "
-            "boundary (in-interval speech mixed with past-interval speech; it "
-            "localizes no single utterance — synthetic broad segments are not "
-            "forced-alignment evidence); abstained (never accepted)"
+            f"{broad_segment_matches} samples: the match rested on a broad ASR "
+            "segment crossing the proposed-interval boundary (in-interval speech "
+            "mixed with past-interval speech; it localizes no single utterance — "
+            "synthetic broad segments are not forced-alignment evidence); "
+            "abstained (never accepted, never a contradiction-reject; applies on "
+            "every language path)"
         )
     if mock_verifier_used:
         notes_parts.append("mock semantic verifier used (test-only)")

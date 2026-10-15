@@ -27,7 +27,10 @@ These regressions pin the corrective behaviour:
 
 Verifier-call accounting is asserted so the bounded extra probes are counted in
 verifier_calls/semantic_seconds while asr_calls stays transcription-only (F07
-separation preserved).
+separation preserved). P2-2 (fifth review) adds the same-language precise-evidence
+parity section: a broad-only overlap must ABSTAIN (never accept, never
+contradiction-reject) on the lexical path too, so acceptance quality never
+depends on which language path fired.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ from pathlib import Path
 from bench import validator
 from bench.asr import MockSemanticVerifier, SemanticVerdict, Transcription
 from bench.manifests import CaseManifest, ProposalRecord
-from bench.validator import _near_duplicate, validate_proposal
+from bench.validator import _near_duplicate, _segment_timing, validate_proposal
 
 SECOND = 1_000_000
 
@@ -239,7 +242,7 @@ def test_matching_dialogue_only_in_padding_abstains(tmp_path, monkeypatch):
 
 
 def test_repeated_dialogue_inside_and_padding_abstains(tmp_path, monkeypatch):
-    # Plan's Japanese example: "この街はわたしが守る" at the proposed time AND
+    # Plan's Japanese example: the in-interval line at the proposed time AND
     # identically in the padding; the verifier matches both -> position ambiguous.
     original = {"e3": (1 * SECOND, 2 * SECOND)}
     corrupted = {"e3": (1 * SECOND, 2 * SECOND)}
@@ -450,15 +453,13 @@ def test_extra_padding_probe_calls_are_accounted(tmp_path, monkeypatch):
     # one main verifier call + one bounded extra padding probe.
     assert acc.verifier_calls == 2
     assert acc.asr_calls == 1
-    assert (
-        acc.semantic_seconds >= 0.10
-    )  # two 0.05 s probe verdicts, transcription-only asr
+    assert acc.semantic_seconds >= 0.10  # two 0.05 s probe verdicts, asr-only asec
     assert len(verifier.transcripts) == 2
 
 
-# --- 9. per-segment dilution: two precise in-interval utterances, padding =====
+# --- 9. per-segment dilution: two precise in-interval utterances, padding ======
 #    repeats ONE of them verbatim -> the joined precise text dilutes the ratio,
-#    so the old joined-only comparison auto-accepted. Must abstain. ===========
+#    so the old joined-only comparison auto-accepted. Must abstain. =============
 
 
 def test_repeat_of_one_of_two_precise_lines_abstains(tmp_path, monkeypatch):
@@ -712,3 +713,185 @@ def test_near_duplicate_floor_is_inclusive_and_normalized():
     assert _near_duplicate(JA_IN, JA_SPLIT_HEAD) is True
     # Unrelated dialogue is NOT a near-duplicate (below floor, no containment).
     assert _near_duplicate(JA_IN, JA_UNRELATED) is False
+
+
+# --- 17. same-language parity (P2-2): precise evidence on the lexical path ------
+
+EN_PROTECT = "I will protect this city."
+EN_OTHER_LINE = "the ship departs at dawn"
+
+
+def test_same_language_broad_only_abstains_not_rejects(tmp_path, monkeypatch):
+    # ONE broad ASR segment crossing the interval boundary (no precise segment),
+    # reliable en/en pair whose text matches the subtitle. The combined-overlap
+    # ratio is 1.0, so the old lexical accept branch accepted it. It must now
+    # ABSTAIN (content-present, never accept, never a contradiction-reject).
+    original = {"s1": (1 * SECOND, 2 * SECOND)}
+    corrupted = {"s1": (1 * SECOND, 2 * SECOND)}
+    proposal_times = {"s1": (1 * SECOND, 2 * SECOND)}
+    cue_text = {"s1": EN_PROTECT}
+    case, proposal = _mk_case(original, proposal_times, _SINGLE_REGION, "m2-sl-broad")
+    asr = _SegASR(
+        {
+            "s1": (
+                EN_PROTECT,
+                [
+                    # window [0,3.5]: media [0.5,2.6] -> tolerant [0.5,2.5]: BROAD
+                    _seg(500_000, 2_600_000, EN_PROTECT),
+                ],
+            )
+        }
+    )
+    acc = _run_validate(
+        tmp_path,
+        monkeypatch,
+        case,
+        proposal,
+        corrupted,
+        cue_text,
+        asr,
+        "en",
+        subtitle_language="en",
+    )
+    assert acc.accepted_regions == []
+    assert acc.rejected_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert len(acc.abstained_regions) == 1
+    assert acc.abstained_regions[0]["semantic_content_present_in_window"] is True
+    assert acc.abstained_regions[0]["timing_correspondence_verified"] is False
+    assert "broad" in acc.notes
+    notes_log = (tmp_path / "run-m2-sl-broad" / "asr_notes.log").read_text(
+        encoding="utf-8"
+    )
+    assert "a broad ASR segment crosses the proposed interval" in notes_log
+
+
+def test_same_language_precise_plus_padding_repeat_abstains(tmp_path, monkeypatch):
+    # Precise in-interval line AND an identical repeat in the padding: the
+    # same-language ambiguity abstention is preserved.
+    original = {"s2": (1 * SECOND, 2 * SECOND)}
+    corrupted = {"s2": (1 * SECOND, 2 * SECOND)}
+    proposal_times = {"s2": (1 * SECOND, 2 * SECOND)}
+    cue_text = {"s2": EN_PROTECT}
+    case, proposal = _mk_case(original, proposal_times, _SINGLE_REGION, "m2-sl-rep")
+    asr = _SegASR(
+        {
+            "s2": (
+                EN_PROTECT + " " + EN_PROTECT,
+                [
+                    _seg(1 * SECOND, 2 * SECOND, EN_PROTECT),
+                    _seg(3 * SECOND, 3 * SECOND + 500_000, EN_PROTECT),
+                ],
+            )
+        }
+    )
+    acc = _run_validate(
+        tmp_path,
+        monkeypatch,
+        case,
+        proposal,
+        corrupted,
+        cue_text,
+        asr,
+        "en",
+        subtitle_language="en",
+    )
+    assert acc.accepted_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert "position ambiguous" in acc.notes
+    assert acc.abstained_regions[0]["semantic_content_present_in_window"] is True
+
+
+def test_same_language_precise_unique_accepts(tmp_path, monkeypatch):
+    # Positive control: a PRECISE in-interval match with unrelated padding text
+    # keeps automatic acceptance with timing_correspondence_verified.
+    original = {"s3": (1 * SECOND, 2 * SECOND)}
+    corrupted = {"s3": (10 * SECOND, 11 * SECOND)}
+    proposal_times = {"s3": (1 * SECOND, 2 * SECOND)}
+    regions = [{"start_us": 0, "end_us": None, "offset_us": -9 * SECOND}]
+    cue_text = {"s3": EN_PROTECT}
+    case, proposal = _mk_case(original, proposal_times, regions, "m2-sl-good")
+    asr = _SegASR(
+        {
+            "s3": (
+                EN_PROTECT + " " + EN_OTHER_LINE,
+                [
+                    _seg(1 * SECOND, 2 * SECOND, EN_PROTECT),
+                    _seg(3 * SECOND, 3 * SECOND + 500_000, EN_OTHER_LINE),
+                ],
+            )
+        }
+    )
+    acc = _run_validate(
+        tmp_path,
+        monkeypatch,
+        case,
+        proposal,
+        corrupted,
+        cue_text,
+        asr,
+        "en",
+        subtitle_language="en",
+    )
+    assert acc.status == "success"
+    assert len(acc.accepted_regions) == 1
+    assert acc.accepted_regions[0]["timing_correspondence_verified"] is True
+    assert acc.accepted_times_us["s3"] == proposal_times["s3"]
+
+
+def test_same_language_padding_only_abstains(tmp_path, monkeypatch):
+    # Padding-only geometry (line spoken 1 s before the proposed interval) stays
+    # a padding_only_matches abstention on the lexical path.
+    original = {"s4": (1 * SECOND, 2 * SECOND)}
+    corrupted = {"s4": (10 * SECOND, 11 * SECOND)}
+    proposal_times = {"s4": (3 * SECOND, 4 * SECOND)}
+    regions = [{"start_us": 0, "end_us": None, "offset_us": -7 * SECOND}]
+    cue_text = {"s4": EN_PROTECT}
+    case, proposal = _mk_case(original, proposal_times, regions, "m2-sl-pad")
+    asr = _SegASR(
+        {
+            # window [1.5,5.5]: media [1,2] clipped to [1.5,2] rel [0,0.5]
+            "s4": (EN_PROTECT, [_seg(0, 500_000, EN_PROTECT)])
+        }
+    )
+    acc = _run_validate(
+        tmp_path,
+        monkeypatch,
+        case,
+        proposal,
+        corrupted,
+        cue_text,
+        asr,
+        "en",
+        subtitle_language="en",
+    )
+    assert acc.accepted_regions == []
+    assert acc.rejected_regions == []
+    assert acc.accepted_times_us == corrupted
+    assert acc.abstained_regions[0]["semantic_content_present_in_window"] is True
+    assert "found only in the 1.5 s window padding" in acc.notes
+
+
+def test_in_precise_ratio_is_precise_only_units():
+    # A broad-only overlap reports in_ratio high (content present) but
+    # in_precise_ratio 0 (no precise accept evidence).
+    broad_only = _segment_timing(
+        EN_PROTECT,
+        [_seg(500_000, 2_600_000, EN_PROTECT)],
+        win_off_us=0,
+        start_us=1_000_000,
+        end_us=2_000_000,
+    )
+    assert broad_only["n_precise_overlap"] == 0
+    assert broad_only["in_ratio"] > 0.9
+    assert broad_only["in_precise_ratio"] == 0.0
+    # A precise segment yields in_precise_ratio high.
+    precise = _segment_timing(
+        EN_PROTECT,
+        [_seg(1_000_000, 2_000_000, EN_PROTECT)],
+        win_off_us=0,
+        start_us=1_000_000,
+        end_us=2_000_000,
+    )
+    assert precise["n_precise_overlap"] == 1
+    assert precise["in_precise_ratio"] > 0.9

@@ -78,8 +78,9 @@ def fingerprint_payload(
         },
         "subtitle_input": {
             # Keyed by the REGISTERED track id persisted in the case manifest
-            # (M1). The CLI refuses manifests whose ``track_id`` is not a
-            # registered id BEFORE computing any fingerprint, so for every
+            # (M1). The CLI refuses manifests whose track_id is not registered
+            # OR not coherent with the named track's recorded sidecar source
+            # hash / gold target BEFORE computing any fingerprint, so for every
             # run/score/report binding this lookup resolves to the track's real
             # spec (and sha256 when registered); a None lookup is never hashed
             # as a valid subtitle binding.
