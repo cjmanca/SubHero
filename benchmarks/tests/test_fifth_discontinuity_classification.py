@@ -10,10 +10,15 @@ release-discontinuity claim and its false-positive penalty.
 Finding B (P2): a ONE-CUE isolated correction at a track boundary (first or
 last cue) had no outer anchor, so it was classified sustained and a perfect
 repair earned a false-release-discontinuity penalty. Edge 1-cue deviating runs
-against the zero baseline are now EDGE-AMBIGUOUS: the sole boundary claim is
-suppressed, cues are not auto-counted as local, the ambiguity is recorded
-explicitly, and timing repair / harm are scored on the cue axis independently.
-A genuine sustained offset beginning at the first cue keeps its claims.
+against the zero baseline are now EDGE-AMBIGUOUS: the boundary claim is KEPT
+for localization (a genuine boundary release offset keeps bracketing credit),
+an unmatched edge claim is recorded explicitly as
+``unmatched_edge_ambiguous_claims`` instead of a false-positive release
+discontinuity, cues are not auto-counted as local, the ambiguity is recorded
+explicitly in ``edge_ambiguity_descriptors``, and timing repair / harm are
+scored on the cue axis independently. A genuine sustained offset beginning
+at the first cue keeps its claims, and interior 1-cue spikes are never
+edge-ambiguous (adversarial review F1 index guard).
 """
 
 from __future__ import annotations
@@ -299,6 +304,64 @@ def test_sustained_offset_beginning_at_first_cue_keeps_its_claims():
     assert dis["local_cue_adjustments"] == 0
     assert score["counts"]["worsened_unaltered_if_blindly_applied"] == 10
     assert score["counts"]["harmful_if_blindly_applied"] == 10
+
+
+def test_interior_one_cue_spike_is_never_edge_ambiguous():
+    # Adversarial review F1: the EDGE-AMBIGUOUS classification requires the
+    # run to be at a SEQUENCE EDGE. An interior 1-cue deviating spike (even
+    # with a zero-valued penultimate run nearby) stays SUSTAINED: its
+    # unmatched claims keep normal false-positive accounting and no
+    # sustained-region FP may be diverted to the edge-ambiguity counter.
+    def _score(n_blocks, applied):
+        n_cues = sum(n_blocks)
+        original = _dense_original(n_cues)
+        corrupted = dict(original)
+        case = _case("r5-f1", original, [], "S00")
+        return score_case(
+            case, _proposal(case.case_id, corrupted, applied), corrupted, None, TOL
+        )
+
+    # Blocks of 10/1/30/20/10 cues at [0, +2, -2, 0, +5]: the 1-cue +2 spike
+    # is INTERIOR (runs index 1 of 5); the zero block at index 3 is the
+    # penultimate run — the exact escape geometry measured in review.
+    applied: dict[str, int] = {}
+    idx = 0
+    for count, value in [
+        (10, 0),
+        (1, 2 * SECOND),
+        (30, -2 * SECOND),
+        (20, 0),
+        (10, 5 * SECOND),
+    ]:
+        for k in range(idx, idx + count):
+            applied[f"e{k:04d}"] = value
+        idx += count
+    dis = _score([10, 1, 30, 20, 10], applied)["discontinuities"]
+    assert dis["edge_ambiguous_regions"] == 0
+    assert dis["unmatched_edge_ambiguous_claims"] == 0
+    assert dis["detected_breakpoints"] == 4
+    assert dis["false_positive_breakpoints"] == dis["detected_breakpoints"] == 4
+
+    # Six runs (10/1/5/5/20/10): the interior spike is index 1 of 6 with a
+    # zero-valued penultimate run (index 4) — second measured escape.
+    applied = {}
+    idx = 0
+    for count, value in [
+        (10, 0),
+        (1, 2 * SECOND),
+        (5, -2 * SECOND),
+        (5, 3 * SECOND),
+        (20, 0),
+        (10, 7 * SECOND),
+    ]:
+        for k in range(idx, idx + count):
+            applied[f"e{k:04d}"] = value
+        idx += count
+    dis = _score([10, 1, 5, 5, 20, 10], applied)["discontinuities"]
+    assert dis["edge_ambiguous_regions"] == 0
+    assert dis["unmatched_edge_ambiguous_claims"] == 0
+    assert dis["detected_breakpoints"] == 5
+    assert dis["false_positive_breakpoints"] == dis["detected_breakpoints"] == 5
 
 
 def test_classification_never_reads_ground_truth_positions():

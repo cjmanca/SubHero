@@ -402,8 +402,15 @@ def score_case(
             # because its outer anchor is missing. Longer deviating edge runs
             # (and edge runs adjacent to non-baseline values) stay sustained,
             # so a genuine sustained offset starting at the first cue keeps its
-            # change-point claim.
-            if len(runs) > 1 and run["value"] != 0 and len(run["cue_ids"]) == 1:
+            # change-point claim. INTERIOR runs are never edge-ambiguous: the
+            # edge-index guard is required, and an interior 1-cue deviating
+            # spike keeps sustained-region accounting (adversarial review F1).
+            if (
+                len(runs) > 1
+                and (i == 0 or i == len(runs) - 1)
+                and run["value"] != 0
+                and len(run["cue_ids"]) == 1
+            ):
                 neighbor = runs[1] if i == 0 else runs[-2]
                 if neighbor["value"] == 0:
                     classifications.append(RUN_EDGE_AMBIGUOUS)

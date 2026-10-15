@@ -276,6 +276,38 @@ def test_verification_never_modifies_source_files(tmp_path, fixture_dir):
     assert after == before
 
 
+def test_case_evidence_missing_enforces_file_integrity_for_library_callers(
+    tmp_path, fixture_dir
+):
+    root, media, sidecar = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "RI10") == 0
+    _run_score(root, "RI10")
+    paths = cli._paths(root)
+    sources = cli._load_sources(paths["sources"])
+    cache: dict[str, str] = {}
+    assert cli._case_evidence_missing(paths, "RI10", sources, cache) is False
+
+    gen = _generated(root, "RI10")
+    gen_bytes = gen.read_bytes()
+    gen.write_bytes(gen_bytes + b"; mutated\n")
+    cache2: dict[str, str] = {}
+    assert cli._case_evidence_missing(paths, "RI10", sources, cache2) is True
+    gen.write_bytes(gen_bytes)
+    assert cli._case_evidence_missing(paths, "RI10", sources, {}) is False
+
+    sidecar_bytes = sidecar.read_bytes()
+    sidecar.write_bytes(sidecar_bytes + b"; mutated\n")
+    assert cli._case_evidence_missing(paths, "RI10", sources, {}) is True
+    sidecar.write_bytes(sidecar_bytes)
+    assert cli._case_evidence_missing(paths, "RI10", sources, {}) is False
+
+    media_bytes = media.read_bytes()
+    media.unlink()
+    assert cli._case_evidence_missing(paths, "RI10", sources, {}) is True
+    media.write_bytes(media_bytes)
+    assert cli._case_evidence_missing(paths, "RI10", sources, {}) is False
+
+
 def test_report_hashes_shared_source_media_once_per_generation(
     tmp_path, fixture_dir, monkeypatch
 ):
