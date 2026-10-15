@@ -132,6 +132,12 @@ LOCAL_MIN_ANCHOR_CUES = 1
 # silently swallowed as local adjustments.
 LOCAL_AMBIGUOUS_MAX_CUES = 2 * LOCAL_MAX_CUES
 
+# Internal run classifications (scoring-internal labels, reported via counts/
+# descriptors; kept as constants so the classification sites cannot drift).
+RUN_TRANSIENT = "transient"
+RUN_AMBIGUOUS = "ambiguous"
+RUN_SUSTAINED = "sustained"
+
 
 @dataclass(frozen=True)
 class Tolerances:
@@ -353,23 +359,27 @@ def score_case(
             0 < i < len(runs) - 1 and runs[i - 1]["value"] == runs[i + 1]["value"]
         )
         if not reversible:
-            classifications.append("sustained")
+            classifications.append(RUN_SUSTAINED)
             continue
         cue_count = len(run["cue_ids"])
         span_us = onset_of(run["cue_ids"][-1]) - onset_of(run["cue_ids"][0])
+        # At LOCAL_MIN_ANCHOR_CUES = 1 this guard is always True: runs are
+        # maximal and non-empty, and `reversible` already requires both flanking
+        # runs to exist. It is a declared, tunable support requirement — raising
+        # it above 1 activates the short-run-with-weak-anchors ambiguous band.
         anchors = (
             len(runs[i - 1]["cue_ids"]) >= LOCAL_MIN_ANCHOR_CUES
             and len(runs[i + 1]["cue_ids"]) >= LOCAL_MIN_ANCHOR_CUES
         )
         temporally_short = span_us <= LOCAL_MAX_SPAN_US
         if anchors and cue_count <= LOCAL_MAX_CUES and temporally_short:
-            classifications.append("transient")
+            classifications.append(RUN_TRANSIENT)
         elif cue_count <= LOCAL_AMBIGUOUS_MAX_CUES and temporally_short:
             # Borderline short region: conservative and explicit, never silent.
-            classifications.append("ambiguous")
+            classifications.append(RUN_AMBIGUOUS)
         else:
-            classifications.append("sustained")
-    transient = [c == "transient" for c in classifications]
+            classifications.append(RUN_SUSTAINED)
+    transient = [c == RUN_TRANSIENT for c in classifications]
     # Only cues whose applied correction actually deviates from the flanking
     # value are local adjustments; a zero-run sandwiched between two equal
     # shifted blocks (oscillation) suppresses its transient boundaries, but its
@@ -378,7 +388,7 @@ def score_case(
     local_cue_ids = sorted(
         cid
         for i, run in enumerate(runs)
-        if classifications[i] == "transient" and run["value"] != 0
+        if classifications[i] == RUN_TRANSIENT and run["value"] != 0
         for cid in run["cue_ids"]
     )
     ambiguous_regions = [
@@ -392,7 +402,7 @@ def score_case(
             "onset_span_us": onset_of(run["cue_ids"][-1]) - onset_of(run["cue_ids"][0]),
         }
         for i, run in enumerate(runs)
-        if classifications[i] == "ambiguous"
+        if classifications[i] == RUN_AMBIGUOUS
     ]
 
     # A step in applied correction between consecutive cue anchors (a, b]

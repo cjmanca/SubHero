@@ -640,7 +640,7 @@ def test_competitors_exceed_cap_fail_closed_note_accurate(tmp_path, monkeypatch)
     assert "fail-closed abstain" in notes_log
 
 
-# --- 15. probe EXCEPTION on a competitor fails closed + records content-present --
+# --- 14. probe EXCEPTION on a competitor fails closed + records content-present --
 
 
 def test_padding_probe_exception_fails_closed_records_content(tmp_path, monkeypatch):
@@ -695,7 +695,7 @@ def test_padding_probe_exception_fails_closed_records_content(tmp_path, monkeypa
     assert acc.abstained_regions[0]["timing_correspondence_verified"] is False
 
 
-# --- 16. _near_duplicate boundary + normalization units ------------------------
+# --- 15. _near_duplicate boundary + normalization units ------------------------
 
 
 def test_near_duplicate_floor_is_inclusive_and_normalized():

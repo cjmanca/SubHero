@@ -32,7 +32,9 @@ from bench.fingerprint import fingerprint_payload
 from bench.manifests import AcceptanceRecord, read_json, write_json
 
 FFMPEG = shutil.which("ffmpeg")
-pytestmark = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg required")
+# Applied per-test: the two pure prepare_case identity tests run without ffmpeg;
+# only the CLI/media tests need it.
+requires_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg required")
 
 RC_STALE = 6
 RC_IDENTITY = 2
@@ -279,10 +281,11 @@ def test_prepare_case_track_id_is_not_the_file_stem(fixture_dir, tmp_path):
         track_id="registered-main",
     )
     assert case.track_id == "registered-main"
-    assert case.track_id != fixture_dir.name  # not derived from any path
+    assert case.track_id != (fixture_dir / "episode.ass").stem  # not path-derived
     assert case.to_json()["track_id"] == "registered-main"
 
 
+@requires_ffmpeg
 def test_registered_sidecar_manifest_preserves_registered_id(tmp_path, fixture_dir):
     root = tmp_path / "benchroot"
     media = _build_mkv(tmp_path)
@@ -315,6 +318,7 @@ def test_registered_sidecar_manifest_preserves_registered_id(tmp_path, fixture_d
 # ---------------------------------------------------------------------------
 
 
+@requires_ffmpeg
 def test_two_same_name_sidecar_tracks_preserve_distinct_ids(
     tmp_path, fixture_dir, capsys
 ):
@@ -359,6 +363,7 @@ def _load_case(root: Path, case_id: str):
     return cli._load_case(cli._lookup_case_path(paths, case_id))
 
 
+@requires_ffmpeg
 def test_two_same_name_sidecar_language_resolution_no_cross_leakage(
     tmp_path, fixture_dir, monkeypatch, capsys
 ):
@@ -396,6 +401,7 @@ def _stem_rewrite_manifest(root: Path, case_id: str) -> Path:
     return manifest_path
 
 
+@requires_ffmpeg
 def test_legacy_stem_manifest_fails_closed_at_run_and_score(
     tmp_path, fixture_dir, capsys
 ):
@@ -432,6 +438,7 @@ def test_legacy_stem_manifest_fails_closed_at_run_and_score(
     assert "prepare the case" in captured.err.lower()
 
 
+@requires_ffmpeg
 def test_legacy_stem_manifest_report_is_never_comparative(
     tmp_path, fixture_dir, capsys
 ):
@@ -472,6 +479,7 @@ def test_legacy_stem_manifest_report_is_never_comparative(
 # ---------------------------------------------------------------------------
 
 
+@requires_ffmpeg
 def test_changed_registered_subtitle_invalidates_prior_candidate_results(
     tmp_path, fixture_dir, capsys
 ):

@@ -791,7 +791,7 @@ def validate_proposal(
         content-present); a competitor the verifier does NOT match leaves the
         in-interval match unambiguous; a probe with no usable verdict fails closed
         (abstain); and when there are more competitors than the cap allows, the
-        sample fails closed as ``cross_language_ambiguity_budget`` (an
+         sample fails closed as ``cross_language_ambiguity_budget`` (an
          UNPROBED competing occurrence, not a matched-both result). Every
          abstention here records ``semantic_content_present_in_window`` (the
          in-interval verifier "match" already proved the content is present; only

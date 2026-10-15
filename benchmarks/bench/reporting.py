@@ -372,6 +372,14 @@ def build_report(
                     if dis.get("local_cue_adjustments", 0)
                     else ""
                 )
+                + (
+                    f"; {dis['ambiguous_offset_regions']} ambiguous short "
+                    "offset regions (borderline local-vs-release regions: "
+                    "breakpoint claims kept, cues never auto-counted as local, "
+                    "descriptors in score.json — explicit, never silent)"
+                    if dis.get("ambiguous_offset_regions", 0)
+                    else ""
+                )
             )
         for s in case_scores:
             dis = s["discontinuities"]

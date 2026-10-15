@@ -628,8 +628,9 @@ def test_collided_sidecar_genuine_run_produces_zero_rejects(
     acc = AcceptanceRecord(
         **read_json(_cand_dir(root, "COLLQ", "b1-va") / "acceptance.json")
     )
-    # A verified same-language pair is required for a lexical reject; identity-
-    # unknown must NEVER reject legitimate translations.
+    # A verified same-language pair is required for a lexical reject; the M1
+    # registered-id lookup resolves track b's own language hint, so legitimate
+    # translations are never rejected on identity grounds.
     assert acc.rejected_regions == []
 
 
