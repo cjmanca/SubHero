@@ -23,14 +23,20 @@ from .adapters import (
 )
 from .asr import get_semantic_verifier, get_transcriber
 from .corrupt import prepare_case
-from .fingerprint import compute_input_fingerprint
+from .fingerprint import GOLD_FILE_MISSING, compute_input_fingerprint
 from .manifests import CaseManifest, ProposalRecord, read_json, write_json
 from .media import extract_audio, extract_subtitle_stream, ffprobe_streams, sha256_file
 from .paths import add_source_root, configure, require_safe_id
 from .reporting import build_report, write_report
 from .scoring import Tolerances, score_case
 from .subtitles import Track
-from .validator import normalize_language, validate_proposal
+from .validator import (
+    MIN_MATCH_RATIO,
+    PAD_US,
+    TIMING_TOLERANCE_US,
+    normalize_language,
+    validate_proposal,
+)
 
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = DEFAULT_ROOT.parent
@@ -354,11 +360,26 @@ def _verify_sources(
     s = sources["sources"].get(source_id)
     if s is None:
         return [f"source {source_id} no longer registered"]
-    media = Path(s["media_path"])
+    mp = s.get("media_path")
+    if not isinstance(mp, str) or not mp:
+        return [
+            (
+                f"source {source_id} registry record has no media_path; "
+                "re-register the source"
+            )
+        ]
+    media = Path(mp)
     if not media.is_file():
         problems.append("registered media file missing")
-    elif sha256_file(media) != s["media_sha256"]:
-        problems.append("SOURCE MUTATION DETECTED: media fingerprint changed")
+    else:
+        recorded_media = s.get("media_sha256")
+        if not isinstance(recorded_media, str) or not recorded_media:
+            problems.append(
+                f"source {source_id} registry record has no media_sha256; "
+                "re-register the source"
+            )
+        elif sha256_file(media) != recorded_media:
+            problems.append("SOURCE MUTATION DETECTED: media fingerprint changed")
     for track_id, spec in s.get("subtitle_specs", {}).items():
         recorded = s.get("subtitle_sha256", {}).get(track_id)
         if spec.startswith("sidecar:") and recorded:
@@ -378,11 +399,30 @@ def _verify_sources(
     return problems
 
 
+def _gold_content_sha256(paths: dict[str, Path], case: CaseManifest) -> str | None:
+    """Live content hash of the case's gold-classification file (F02 binding).
+
+    ``None`` when the case declares no gold input; the literal
+    ``GOLD_FILE_MISSING`` when the manifest names a gold file that cannot be
+    read (treated as part of the case identity, so a deleted/added gold file
+    is a fingerprint change, never a silent pass); otherwise the sha256 of the
+    file bytes. Recomputed at run, score, b1-va base/acceptance binding, and
+    report so edits to the oracle material invalidate dependent artifacts.
+    """
+    if not case.gold_classification_path:
+        return None
+    gold_path = _resolve_under_root(paths, case.gold_classification_path)
+    if not gold_path.is_file():
+        return GOLD_FILE_MISSING
+    return sha256_file(gold_path)
+
+
 def _provenance_problem(
     cand_dir: Path,
     candidate_id: str,
     case: CaseManifest,
     source: dict,
+    gold_sha: str | None = None,
 ) -> str:
     """Return a refusal reason when persisted candidate artifacts are not bound
     to the current case generation; the empty string when they are.
@@ -404,6 +444,11 @@ def _provenance_problem(
         run = read_json(run_path)
     except (OSError, ValueError) as exc:
         return f"UNVERIFIED: {label} run.json is unreadable ({exc}); {rerun}"
+    if not isinstance(run, dict):
+        return (
+            f"UNVERIFIED: {label} run.json is not a JSON object "
+            f"({type(run).__name__}); {rerun}"
+        )
     recorded = run.get("input_fingerprint")
     if not recorded:
         return (
@@ -412,13 +457,14 @@ def _provenance_problem(
             f"fingerprints and cannot be bound to this case generation; {rerun}"
         )
     current = compute_input_fingerprint(
-        case, source, candidate_id, run.get("tool_versions", {})
+        case, source, candidate_id, run.get("tool_versions", {}), gold_sha
     )
     if recorded != current:
         return (
             f"STALE: {label} was run against a different case generation "
-            f"(run.json input_fingerprint {recorded[:16]}… != current {current[:16]}…; "
-            f"case seed/inputs, selected audio, source fingerprint, or tool "
+            f"(run.json input_fingerprint {str(recorded)[:16]}… != current {str(current)[:16]}…; "
+            f"case seed/inputs, ground-truth annotations, gold/oracle inputs, "
+            f"subtitle input, selected audio, source fingerprint, or tool "
             f"identity changed); {rerun}"
         )
     recorded_proposal = run.get("proposal_sha256")
@@ -437,22 +483,39 @@ def _provenance_problem(
     if actual != recorded_proposal:
         return (
             f"STALE: {label} proposal.json bytes no longer match run.json "
-            f"proposal_sha256 (recorded {recorded_proposal[:16]}… vs actual "
-            f"{actual[:16]}…; tampered or replaced?); {rerun}"
+            f"proposal_sha256 (recorded {str(recorded_proposal)[:16]}… vs actual "
+            f"{str(actual)[:16]}…; tampered or replaced?); {rerun}"
         )
     return ""
+
+
+REQUIRED_VALIDATION_CONFIG_KEYS = (
+    "seed",
+    "language",
+    "subtitle_language",
+    "asr_model",
+    "verifier_model",
+    "pad_us",
+    "min_match_ratio",
+    "timing_tolerance_us",
+)
 
 
 def _acceptance_binding_problem(
     cand_dir: Path,
     run: dict,
     case: CaseManifest,
+    source: dict,
+    paths: dict[str, Path],
+    gold_sha: str | None = None,
 ) -> str:
     """Return a refusal reason when a b1-va ``acceptance.json`` is not bound to
-    the verified ``run.json`` provenance; the empty string when it is.
+    the verified ``run.json`` provenance AND to the CURRENT base arm; the empty
+    string when it is.
 
-    Binding contract (P1-1). ``cmd_score`` loads an acceptance record ONLY for
-    the ``b1-va`` arm, and only when ALL of the following hold:
+    Binding contract (P1-1 + third-review F01). ``cmd_score`` loads an
+    acceptance record ONLY for the ``b1-va`` arm, and only when ALL of the
+    following hold:
 
     * ``run.json`` records ``acceptance_sha256`` equal to the actual
       ``acceptance.json`` bytes. ``cmd_run`` writes ``acceptance.json`` FIRST,
@@ -464,11 +527,27 @@ def _acceptance_binding_problem(
     * ``acceptance.candidate_id == "b1-va"`` — the acceptance is attributed to
       the validating arm, not to a base/proposal-only arm.
     * ``acceptance.validated_candidate_id == run.validated_candidate_id`` —
-      the base arm whose ``proposal.json`` copy the acceptance validated. The
-      proposal copy is already bound to ``run.proposal_sha256`` by
-      ``_provenance_problem``; the base identity is bound through these
-      EXISTING ``AcceptanceRecord`` fields (``candidate_id`` /
-      ``validated_candidate_id`` from ``manifests.py``), not a new field.
+      the base arm identity (name) is bound.
+    * F01 base-run/proposal binding: the base arm's CURRENT artifacts must
+      still match what the acceptance validated. The base arm must pass the
+      full ``_provenance_problem`` gate against the current case generation
+      (fingerprint + proposal bytes), the recorded ``base_input_fingerprint``
+      must equal the base ``run.json``'s fingerprint, the recorded
+      ``base_proposal_sha256`` must equal the CURRENT base ``proposal.json``
+      bytes, and the recorded ``base_run_sha256`` must equal the CURRENT base
+      ``run.json`` bytes. Re-running the base with different settings/results
+      (new proposal bytes, new run record, new fingerprint from seed/audio/
+      gold/ground-truth changes) therefore invalidates the downstream
+      acceptance AT READ TIME (score and report) without rerunning the
+      validator: the old acceptance can never be scored as if it validated
+      the new proposal.
+    * F01 validation-identity binding: ``run.json`` records a
+      ``validation_config`` (sampling seed, resolved spoken/subtitle language
+      identities, ASR and semantic-verifier model ids, validator constants;
+      NO credentials) with every required key present. Artifacts predating
+      this contract are unbound and must be re-validated; the config is
+      embedded in the score row so a run made with a different seed/model/
+      language can never be silently labeled as the same experiment.
 
     Missing, legacy (no recorded hash), unreadable, tampered, replaced, or
     planted acceptance artifacts return a non-empty reason so ``cmd_score``
@@ -497,18 +576,42 @@ def _acceptance_binding_problem(
     if actual != recorded:
         return (
             f"STALE: {label} acceptance.json bytes no longer match run.json "
-            f"acceptance_sha256 (recorded {recorded[:16]}… vs actual {actual[:16]}…; "
+            f"acceptance_sha256 (recorded {str(recorded)[:16]}… vs actual {str(actual)[:16]}…; "
             f"tampered, replaced, or planted?); {rerun}"
         )
     try:
-        acceptance = AcceptanceRecord(**read_json(acc_path))
-    except (OSError, ValueError) as exc:
+        acceptance_data = read_json(acc_path)
+        if not isinstance(acceptance_data, dict):
+            raise TypeError(
+                f"acceptance.json is a JSON {type(acceptance_data).__name__}, not an object"
+            )
+        acceptance = AcceptanceRecord(**acceptance_data)
+    except (OSError, ValueError, TypeError) as exc:
         return f"UNVERIFIED: {label} acceptance.json is unreadable ({exc}); {rerun}"
     if acceptance.case_id != case.case_id:
         return (
             f"UNVERIFIED: {label} acceptance.json case_id "
             f"{acceptance.case_id!r} does not match this case {case.case_id!r} "
             f"(cross-case acceptance planted); {rerun}"
+        )
+    if (
+        not isinstance(acceptance.accepted_times_us, dict)
+        or not isinstance(acceptance.accepted_regions, list)
+        or not isinstance(acceptance.rejected_regions, list)
+        or not isinstance(acceptance.abstained_regions, list)
+        or not isinstance(acceptance.sample_cue_ids, list)
+        or not isinstance(acceptance.validated_candidate_id, str)
+        or not isinstance(acceptance.status, str)
+        or any(
+            not isinstance(v, (list, tuple))
+            or len(v) != 2
+            or any(type(x) is not int for x in v)
+            for v in acceptance.accepted_times_us.values()
+        )
+    ):
+        return (
+            f"UNVERIFIED: {label} acceptance.json field types are "
+            f"incompatible (hostile/planted values); refusing to score; {rerun}"
         )
     if acceptance.candidate_id != "b1-va":
         return (
@@ -526,6 +629,91 @@ def _acceptance_binding_problem(
             f"UNVERIFIED: {label} acceptance.json validated_candidate_id "
             f"{acceptance.validated_candidate_id!r} != run.json "
             f"{validated!r}; {rerun}"
+        )
+    validation_config = run.get("validation_config")
+    if not isinstance(validation_config, dict):
+        return (
+            f"UNVERIFIED: {label} run.json records no validation_config "
+            f"(sampling seed / language identities / ASR+verifier models are "
+            f"unbound; predates the F01 binding contract); {rerun}"
+        )
+    missing_keys = [
+        k for k in REQUIRED_VALIDATION_CONFIG_KEYS if k not in validation_config
+    ]
+    if missing_keys:
+        return (
+            f"UNVERIFIED: {label} run.json validation_config is missing keys "
+            f"{missing_keys}; the validation input identity is unbound; {rerun}"
+        )
+    base_rerun = f"re-run the base arm, then re-run b1-va (run --case {case.case_id} --candidate {validated} && run --case {case.case_id} --candidate b1-va --base-candidate {validated})"
+    base_dir = paths["results"] / case.case_id / validated
+    base_run_path = base_dir / "run.json"
+    base_proposal_path = base_dir / "proposal.json"
+    if not base_run_path.is_file():
+        return (
+            f"UNVERIFIED: {label} base arm {validated} has no run.json; the "
+            f"validated base run is unbound; {base_rerun}"
+        )
+    try:
+        base_run = read_json(base_run_path)
+    except (OSError, ValueError) as exc:
+        return (
+            f"UNVERIFIED: {label} base arm {validated} run.json is unreadable "
+            f"({exc}); {base_rerun}"
+        )
+    if not isinstance(base_run, dict):
+        return (
+            f"UNVERIFIED: {label} base arm {validated} run.json is not a JSON "
+            f"object ({type(base_run).__name__}); {base_rerun}"
+        )
+    base_problem = _provenance_problem(base_dir, validated, case, source, gold_sha)
+    if base_problem:
+        return (
+            f"STALE: {label} accepted a base proposal that is no longer the "
+            f"current case generation — {base_problem}; the validator was run "
+            f"against different base inputs; {base_rerun}"
+        )
+    recorded_base_fp = run.get("base_input_fingerprint")
+    current_base_fp = base_run.get("input_fingerprint")
+    if not recorded_base_fp or not current_base_fp:
+        return (
+            f"UNVERIFIED: {label} run.json records no base_input_fingerprint; "
+            f"the validated base run generation is unbound; {base_rerun}"
+        )
+    if recorded_base_fp != current_base_fp:
+        return (
+            f"STALE: {label} validated base run fingerprint {str(recorded_base_fp)[:16]}… "
+            f"!= current base {validated} fingerprint {str(current_base_fp)[:16]}…; "
+            f"the base arm was re-run against a different case generation; "
+            f"{base_rerun}"
+        )
+    recorded_base_proposal = run.get("base_proposal_sha256")
+    if not recorded_base_proposal:
+        return (
+            f"UNVERIFIED: {label} run.json records no base_proposal_sha256; "
+            f"the validated base proposal bytes are unbound; {base_rerun}"
+        )
+    current_base_proposal = sha256_file(base_proposal_path)
+    if recorded_base_proposal != current_base_proposal:
+        return (
+            f"STALE: {label} validated base proposal bytes {str(recorded_base_proposal)[:16]}… "
+            f"!= current base proposal.json bytes {str(current_base_proposal)[:16]}…; "
+            f"the base arm produced a different proposal (settings/results "
+            f"changed) and the acceptance was not re-validated; {base_rerun}"
+        )
+    recorded_base_run_sha = run.get("base_run_sha256")
+    if not recorded_base_run_sha:
+        return (
+            f"UNVERIFIED: {label} run.json records no base_run_sha256; the "
+            f"validated base run record is unbound; {base_rerun}"
+        )
+    current_base_run_sha = sha256_file(base_run_path)
+    if recorded_base_run_sha != current_base_run_sha:
+        return (
+            f"STALE: {label} validated base run.json bytes {str(recorded_base_run_sha)[:16]}… "
+            f"!= current base run.json bytes {str(current_base_run_sha)[:16]}…; the "
+            f"base run record changed (re-run with new identity) and the "
+            f"acceptance was not re-validated; {base_rerun}"
         )
     return ""
 
@@ -719,7 +907,7 @@ def cmd_source_list(args, paths) -> int:
     sources = _load_sources(paths["sources"])
     for sid, s in sorted(sources["sources"].items()):
         print(
-            f"{sid}\tmedia={s['media_path']}\tsha256={s['media_sha256'][:16]}…\ttracks={list(s['subtitle_specs'])}"
+            f"{sid}\tmedia={s.get('media_path', 'MISSING')}\tsha256={str(s.get('media_sha256', ''))[:16]}…\ttracks={list(s.get('subtitle_specs', {}))}"
         )
     return 0
 
@@ -757,7 +945,15 @@ def cmd_case_prepare(args, paths) -> int:
     if not s:
         print(f"unknown source {args.source_id}", file=sys.stderr)
         return 2
-    spec = s["subtitle_specs"].get(args.track_id)
+    specs = s.get("subtitle_specs")
+    if not isinstance(specs, dict):
+        print(
+            f"REFUSED: source {args.source_id} registry record has no "
+            "subtitle_specs; re-register the source",
+            file=sys.stderr,
+        )
+        return 2
+    spec = specs.get(args.track_id)
     if spec is None:
         print(
             f"track {args.track_id} not registered for source {args.source_id}",
@@ -792,7 +988,15 @@ def cmd_case_prepare(args, paths) -> int:
             )
             return 2
         src_ass = scratch_case / f"{args.track_id}.ass"
-        extract_subtitle_stream(Path(s["media_path"]), int(value), src_ass)
+        mp = s.get("media_path")
+        if not isinstance(mp, str) or not mp:
+            print(
+                f"REFUSED: source {args.source_id} registry record has no "
+                "media_path; re-register the source",
+                file=sys.stderr,
+            )
+            return 2
+        extract_subtitle_stream(Path(mp), int(value), src_ass)
     else:
         print(f"unsupported subtitle spec {spec}", file=sys.stderr)
         return 2
@@ -862,8 +1066,18 @@ def _get_reference_audio(
     re-registration with a different ``--audio`` never reuses old audio and a
     swapped WAV is never trusted on JSON metadata alone.
     """
-    s = sources["sources"][case.source_id]
-    media = Path(s["media_path"])
+    s = sources["sources"].get(case.source_id)
+    if s is None:
+        raise StreamSelectionError(
+            f"source {case.source_id} no longer registered; re-register before running"
+        )
+    mp = s.get("media_path")
+    if not isinstance(mp, str) or not mp:
+        raise StreamSelectionError(
+            f"source {case.source_id} registry record has no media_path; "
+            "re-register the source"
+        )
+    media = Path(mp)
     sel = s.get("audio_selected")
     if sel is not None:
         audio_stream = f"0:a:{sel['sidx']}"
@@ -944,6 +1158,7 @@ def cmd_run(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
+        gold_sha = _gold_content_sha256(paths, case)
         corrupted_path = _resolve_generated(paths, case)
         corrupted = Track.load(corrupted_path, case.fmt)
         corrupted_times = corrupted.time_map()
@@ -997,10 +1212,12 @@ def cmd_run(args, paths) -> int:
                     "reason": proposal.notes,
                     "input_sha256": case.generated_subtitle_sha256,
                     # Versioned identity of everything this run consumed: case
-                    # generation + selected source audio + rights + candidate +
-                    # tool probes. score/b1-va recompute and require equality.
+                    # generation (incl. ground truth + gold/oracle material) +
+                    # selected source audio + subtitle input + rights +
+                    # candidate + tool probes. score/b1-va recompute and
+                    # require equality.
                     "input_fingerprint": compute_input_fingerprint(
-                        case, source, cand, meta.get("tool_versions", {})
+                        case, source, cand, meta.get("tool_versions", {}), gold_sha
                     ),
                     "proposal_sha256": proposal_sha256,
                     "tool_versions": meta.get("tool_versions", {}),
@@ -1019,7 +1236,7 @@ def cmd_run(args, paths) -> int:
                 )
                 rc = 2
                 continue
-            base_problem = _provenance_problem(base_dir, base, case, source)
+            base_problem = _provenance_problem(base_dir, base, case, source, gold_sha)
             if base_problem:
                 print(
                     f"REFUSED ({case_id}/b1-va): base proposal unusable — {base_problem}",
@@ -1027,6 +1244,8 @@ def cmd_run(args, paths) -> int:
                 )
                 rc = 6
                 continue
+            base_run_path = base_dir / "run.json"
+            base_run = read_json(base_run_path)
             base_proposal = ProposalRecord(**read_json(base_proposal_path))
             # Transcription (BENCH_ASR_*) and semantic verification
             # (BENCH_SEM_VERIFY_*) are independently configured boundaries;
@@ -1073,7 +1292,15 @@ def cmd_run(args, paths) -> int:
             acceptance_sha256 = sha256_file(va_dir / "acceptance.json")
             va_proposal_path = va_dir / "proposal.json"
             write_json(va_proposal_path, base_proposal.to_json())
-            source_media = Path(source["media_path"])
+            mp = source.get("media_path")
+            if not isinstance(mp, str) or not mp:
+                print(
+                    f"REFUSED: source {case.source_id} registry record has no "
+                    "media_path; re-register the source",
+                    file=sys.stderr,
+                )
+                return 2
+            source_media = Path(mp)
             write_json(
                 va_dir / "run.json",
                 {
@@ -1085,16 +1312,46 @@ def cmd_run(args, paths) -> int:
                     "reason": acc.notes,
                     "asr_seconds": acc.asr_seconds,
                     "asr_calls": acc.asr_calls,
+                    # F07: transcription and semantic verification are separate
+                    # cost boundaries; asr_seconds never includes verifier time.
+                    "semantic_seconds": acc.semantic_seconds,
+                    "verifier_calls": acc.verifier_calls,
+                    "inference_seconds_total": acc.asr_seconds + acc.semantic_seconds,
                     "input_sha256": case.generated_subtitle_sha256,
                     # b1-va commits to the same case-generation identity as its
                     # base arm (base validity is verified before validating).
                     "input_fingerprint": compute_input_fingerprint(
-                        case, source, "b1-va", {}
+                        case, source, "b1-va", {}, gold_sha
                     ),
                     "proposal_sha256": sha256_file(va_proposal_path),
                     "acceptance_sha256": acceptance_sha256,
                     "validated_candidate_id": base,
                     "base_proposal_sha256": sha256_file(base_proposal_path),
+                    # F01: bind the acceptance to the EXACT validated base run
+                    # (id + record bytes + generation fingerprint), not just the
+                    # base arm name, and to the validation input configuration
+                    # (seed, resolved identities, ASR/verifier models; no
+                    # credentials). score/report re-verify these at read time,
+                    # so a base re-run with new settings/results invalidates
+                    # the downstream acceptance even without rerunning the
+                    # validator.
+                    "base_run_id": base_run.get("run_id"),
+                    "base_run_sha256": sha256_file(base_run_path),
+                    "base_input_fingerprint": base_run.get("input_fingerprint"),
+                    "validation_config": {
+                        "seed": args.seed,
+                        "language": audio_hint,
+                        "subtitle_language": subtitle_hint,
+                        "asr_model": getattr(transcriber, "model", None)
+                        if transcriber
+                        else None,
+                        "verifier_model": getattr(verifier, "model", None)
+                        if verifier
+                        else None,
+                        "pad_us": PAD_US,
+                        "min_match_ratio": MIN_MATCH_RATIO,
+                        "timing_tolerance_us": TIMING_TOLERANCE_US,
+                    },
                     # Provenance: which source audio stream the decoded
                     # reference.wav (validated windows' sole input) came from.
                     "audio_stream": audio_stream,
@@ -1129,6 +1386,7 @@ def cmd_score(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
+        gold_sha = _gold_content_sha256(paths, case)
         corrupted = Track.load(_resolve_generated(paths, case), case.fmt)
         corrupted_times = corrupted.time_map()
         candidates = list(CANDIDATES) if args.all else args.candidate
@@ -1153,7 +1411,7 @@ def cmd_score(args, paths) -> int:
             # stale, and tampered artifacts are refused with rc 6 and any
             # pre-existing score.json for that candidate is deleted so a stale
             # number cannot leak into reports.
-            provenance = _provenance_problem(d, cand, case, source)
+            provenance = _provenance_problem(d, cand, case, source, gold_sha)
             if provenance:
                 print(f"REFUSED ({case_id}/{cand}): {provenance}", file=sys.stderr)
                 _delete_stale_score(
@@ -1167,7 +1425,7 @@ def cmd_score(args, paths) -> int:
             # the report can bind the number back to a matching run (P1-2).
             run = read_json(d / "run.json")
             current_fp = compute_input_fingerprint(
-                case, source, cand, run.get("tool_versions", {})
+                case, source, cand, run.get("tool_versions", {}), gold_sha
             )
             proposal = ProposalRecord(**read_json(prop_path))
             proposal.candidate_id = cand
@@ -1177,7 +1435,9 @@ def cmd_score(args, paths) -> int:
                 # is bound to the verified run.json (recorded hash + identity).
                 from .manifests import AcceptanceRecord
 
-                acc_problem = _acceptance_binding_problem(d, run, case)
+                acc_problem = _acceptance_binding_problem(
+                    d, run, case, source, paths, gold_sha
+                )
                 if acc_problem:
                     print(
                         f"REFUSED ({case_id}/{cand}): {acc_problem}",
@@ -1207,11 +1467,41 @@ def cmd_score(args, paths) -> int:
             score = score_case(case, proposal, corrupted_times, acceptance, tol)
             score["candidate_id"] = cand
             score["input_fingerprint"] = current_fp
+            # The score row also binds the exact proposal bytes it was computed
+            # from (verified against run.json), so a relabeled proposal cannot
+            # keep an old score row rendering in reports.
+            score["proposal_sha256"] = run.get("proposal_sha256")
+            if cand == "b1-va":
+                # F01: the score row records the EXACT base run/proposal the
+                # acceptance validated and the validation input configuration,
+                # so it can never be mislabeled as the same experiment under a
+                # different base, seed, language pair, or model.
+                score["validated_base"] = {
+                    "candidate_id": run.get("validated_candidate_id"),
+                    "run_id": run.get("base_run_id"),
+                    "input_fingerprint": run.get("base_input_fingerprint"),
+                    "proposal_sha256": run.get("base_proposal_sha256"),
+                    "run_sha256": run.get("base_run_sha256"),
+                }
+                score["validation_config"] = run.get("validation_config")
             write_json(d / "score.json", score)
             print(
                 f"scored {case_id}/{cand}: median final onset err {score['timing_errors_final_us']['median_abs_us']} us"
             )
     return rc
+
+
+def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
+    """True when present-day case manifest + registered source cannot be established."""
+    case_path = _lookup_case_path(paths, case_id)
+    if case_path is None:
+        return True
+    try:
+        case = _load_case(case_path)
+    except (OSError, ValueError):
+        return True
+    sources = _load_sources(paths["sources"])
+    return sources["sources"].get(case.source_id) is None
 
 
 def cmd_report(args, paths) -> int:
@@ -1224,15 +1514,21 @@ def cmd_report(args, paths) -> int:
     )
     sources = _load_sources(paths["sources"])
     current_fingerprints: dict[tuple, str] = {}
+    acceptance_stale: list[tuple[str, str]] = []
+    proposal_stale: list[tuple[str, str]] = []
+    artifact_problems: list[tuple[str, str]] = []
+    admitted_pairs: set[tuple] = set()
     runs, scores, versions = [], [], {}
     for case_id in case_ids:
         # Generation binding: recompute each arm's CURRENT fingerprint from the
         # live case manifest + registry source + the run's recorded tool_versions
-        # so a self-consistent run/score pair from an OLDER case generation (its
-        # fingerprint is internally consistent but predates a re-prepare) can be
-        # dropped, not just an unbound one. When the case/source cannot be
-        # loaded the recomputation is skipped for that arm (fail-open to the
-        # existing fingerprint-match binding, never more aggressive).
+        # + the live gold-classification content so a self-consistent run/score
+        # pair from an OLDER case generation (its fingerprint is internally
+        # consistent but predates a re-prepare, a ground-truth edit, or a gold
+        # file change) can be dropped, not just an unbound one. When the
+        # case/source cannot be loaded, current evidence is MISSING (F05): the
+        # case's rows are rendered ONLY in the labeled unverified-historical
+        # section, never in the comparative table.
         case_path = _lookup_case_path(paths, case_id)
         case = None
         if case_path is not None:
@@ -1241,29 +1537,207 @@ def cmd_report(args, paths) -> int:
             except (OSError, ValueError):
                 case = None
         source = sources["sources"].get(case.source_id) if case is not None else None
+        gold_sha = _gold_content_sha256(paths, case) if case is not None else None
+        evidence_missing = case is None or source is None
         for d in (
             (paths["results"] / case_id).iterdir()
             if (paths["results"] / case_id).exists()
             else []
         ):
+            # Per-directory admission: a run/score pair is admitted ONLY when
+            # every read-time integrity check passes. Any exclusion skips the
+            # directory's score.json too, so no obsolete number can render
+            # comparably while its run record is refused (D1/D2 closures).
+            excluded = False
+            admitted_pair = None
             if (d / "run.json").exists():
-                run = read_json(d / "run.json")
-                runs.append(run)
-                versions.update(run.get("tool_versions", {}))
-                if case is not None and source is not None:
+                try:
+                    run = read_json(d / "run.json")
+                except (OSError, ValueError) as exc:
+                    artifact_problems.append(
+                        (case_id, f"run.json in {d.name} is unreadable ({exc})")
+                    )
+                    excluded = True
+                    run = None
+                if run is not None and not isinstance(run, dict):
+                    artifact_problems.append(
+                        (
+                            case_id,
+                            (
+                                f"run.json in {d.name} is a JSON "
+                                f"{type(run).__name__}, not an object"
+                            ),
+                        )
+                    )
+                    excluded = True
+                    run = None
+                if run is not None:
                     cand = run.get("candidate_id")
-                    if cand:
-                        current_fingerprints[(run.get("case_id"), cand)] = (
-                            compute_input_fingerprint(
-                                case,
-                                source,
-                                cand,
-                                run.get("tool_versions", {}),
+                    # F01 read-time binding at report: a b1-va run is bound
+                    # UNCONDITIONALLY when current evidence exists — including
+                    # "acceptance.json missing", which is itself a refusal.
+                    if cand == "b1-va" and not evidence_missing:
+                        acc_problem = _acceptance_binding_problem(
+                            d, run, case, source, paths, gold_sha
+                        )
+                        if acc_problem:
+                            acceptance_stale.append((case_id, acc_problem))
+                            excluded = True
+                    # Report-time proposal byte check (mirrors _provenance_problem
+                    # at score): run.proposal_sha256 must match proposal.json
+                    # bytes on disk, so a relabeled proposal cannot keep its old
+                    # score row rendering as a current comparative number. A
+                    # schema-3 run that records NO proposal hash is itself an
+                    # integrity failure (round-2 P1: dropping the key must not
+                    # skip the byte check).
+                    if not excluded:
+                        recorded_proposal = run.get("proposal_sha256")
+                        if not recorded_proposal:
+                            proposal_stale.append(
+                                (
+                                    case_id,
+                                    (
+                                        f"{cand}: run.json records no "
+                                        "proposal_sha256; proposal bytes are "
+                                        "unbound (schema-3 runs must record it)"
+                                    ),
+                                )
+                            )
+                            excluded = True
+                        elif not (d / "proposal.json").is_file():
+                            proposal_stale.append(
+                                (
+                                    case_id,
+                                    (
+                                        f"{cand}: run.json claims a proposal "
+                                        "but proposal.json is missing"
+                                    ),
+                                )
+                            )
+                            excluded = True
+                        else:
+                            actual_proposal = sha256_file(d / "proposal.json")
+                            if actual_proposal != recorded_proposal:
+                                proposal_stale.append(
+                                    (
+                                        case_id,
+                                        (
+                                            f"{cand}: proposal.json bytes "
+                                            f"{str(actual_proposal)[:16]}… != run.json "
+                                            f"proposal_sha256 "
+                                            f"{str(recorded_proposal)[:16]}… "
+                                            "(tampered or replaced after scoring)"
+                                        ),
+                                    )
+                                )
+                                excluded = True
+                    if not excluded:
+                        pair_key = (run.get("case_id"), cand)
+                        if pair_key in admitted_pairs:
+                            # Round-3 R3-P1: only ONE admitted run/score pair
+                            # per case+candidate. A whole copied triple (run +
+                            # proposal + score) in a second directory must not
+                            # duplicate the comparative row.
+                            artifact_problems.append(
+                                (
+                                    case_id,
+                                    (
+                                        f"{cand}: duplicate candidate directory "
+                                        f"{d.name} (case+candidate pair already "
+                                        "admitted from another directory)"
+                                    ),
+                                )
+                            )
+                            excluded = True
+                    if not excluded:
+                        admitted_pairs.add(pair_key)
+                        runs.append(run)
+                        admitted_pair = (
+                            run.get("case_id"),
+                            cand,
+                            run.get("input_fingerprint"),
+                            run.get("proposal_sha256"),
+                        )
+                        versions.update(run.get("tool_versions", {}))
+                        if case is not None and source is not None and cand:
+                            current_fingerprints[(run.get("case_id"), cand)] = (
+                                compute_input_fingerprint(
+                                    case,
+                                    source,
+                                    cand,
+                                    run.get("tool_versions", {}),
+                                    gold_sha,
+                                )
+                            )
+            if not excluded and (d / "score.json").exists():
+                try:
+                    sc = read_json(d / "score.json")
+                except (OSError, ValueError) as exc:
+                    artifact_problems.append(
+                        (case_id, f"score.json in {d.name} is unreadable ({exc})")
+                    )
+                    sc = None
+                if sc is not None and not isinstance(sc, dict):
+                    artifact_problems.append(
+                        (
+                            case_id,
+                            (
+                                f"score.json in {d.name} is a JSON "
+                                f"{type(sc).__name__}, not an object"
+                            ),
+                        )
+                    )
+                    sc = None
+                if sc is not None:
+                    # Round-3 R3-P1: a score.json only renders through the
+                    # directory that produced it. A copied/planted score.json in
+                    # a directory with no admitted run.json — or whose identity
+                    # fields (case, candidate, fingerprint, proposal hash)
+                    # differ from the directory's own run record — is refused,
+                    # so a genuine pair cannot be piggybacked into an extra
+                    # comparative row.
+                    score_pair = (
+                        sc.get("case_id"),
+                        sc.get("candidate_id"),
+                        sc.get("input_fingerprint"),
+                        sc.get("proposal_sha256"),
+                    )
+                    if admitted_pair is None:
+                        artifact_problems.append(
+                            (
+                                case_id,
+                                (
+                                    f"score.json in {d.name} has no admitted "
+                                    "run.json pairing in the same directory"
+                                ),
                             )
                         )
-            if (d / "score.json").exists():
-                scores.append(read_json(d / "score.json"))
-    text = build_report(list(case_ids), runs, scores, versions, current_fingerprints)
+                    elif score_pair != admitted_pair:
+                        proposal_stale.append(
+                            (
+                                case_id,
+                                (
+                                    f"{sc.get('candidate_id')}: score.json "
+                                    "fields do not pair with the directory's "
+                                    "run.json (identity/fingerprint/proposal "
+                                    "hash differ)"
+                                ),
+                            )
+                        )
+                    else:
+                        scores.append(sc)
+    unverified_cases = [cid for cid in case_ids if _case_evidence_missing(paths, cid)]
+    text = build_report(
+        list(case_ids),
+        runs,
+        scores,
+        versions,
+        current_fingerprints,
+        acceptance_stale,
+        unverified_cases,
+        proposal_stale,
+        artifact_problems,
+    )
     out = Path(args.out) if args.out else paths["results"] / "report.md"
     try:
         write_report(out, text)
@@ -1426,7 +1900,9 @@ def main(argv: list[str] | None = None) -> int:
     ]
     sources = _load_sources(paths["sources"])
     source_roots = [
-        Path(s["media_path"]).resolve().parent for s in sources["sources"].values()
+        Path(s["media_path"]).resolve().parent
+        for s in sources["sources"].values()
+        if isinstance(s.get("media_path"), str) and s.get("media_path")
     ]
     for extra in args.forbidden_root:
         from .paths import add_forbidden_root

@@ -119,10 +119,10 @@ def test_breakpoint_detection_lives_in_original_timeline(tmp_path):
     assert breaks["unresolved_true_breakpoints"] == 0
     assert breaks["resolved_true_breakpoints"] == breaks["true_breakpoints"]
     assert (
-        perfect_score["counts"]["repaired"]
+        perfect_score["counts"]["repaired_if_blindly_applied"]
         == perfect_score["denominators"]["altered_cues"]
     )
-    assert perfect_score["counts"]["worsened_unaltered"] == 0
+    assert perfect_score["counts"]["worsened_unaltered_if_blindly_applied"] == 0
 
 
 def test_noop_is_not_counted_as_abstention(tmp_path):

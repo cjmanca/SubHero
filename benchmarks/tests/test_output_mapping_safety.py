@@ -476,10 +476,10 @@ def test_ambiguous_text_status_counts_as_abstention_no_repaired_credit():
     tol = Tolerances(good_us=50_000, severe_us=250_000, break_match_us=500_000)
     score = score_case(case, ambiguous, corrupted, None, tol)
     assert score["counts"]["abstained_regions"] == 1
-    assert score["counts"]["repaired"] == 0
+    assert score["counts"]["repaired_if_blindly_applied"] == 0
     assert score["counts"]["repaired_proposed"] == 0
     assert score["counts"]["proposals_nonzero"] == 0
-    assert score["counts"]["worsened_unaltered"] == 0
+    assert score["counts"]["worsened_unaltered_if_blindly_applied"] == 0
     assert score["mapping_status"] == "mapping_failure_ambiguous_text"
 
 
@@ -720,7 +720,7 @@ def test_partial_unmapped_scores_as_abstention_without_crash(tmp_path):
     assert score["denominators"]["unmapped_cues"] == 2
     assert score["denominators"]["mapped_cues"] == 2
     for cid in dups:
-        assert not score["per_cue"][cid].get("repaired")
+        assert not score["per_cue"][cid].get("repaired_if_blindly_applied")
         assert not score["per_cue"][cid].get("repaired_proposed")
     for cue in corrupted.cues:
         if cue.cue_id not in dups:

@@ -36,9 +36,15 @@ _ENV_KEYS = (
 
 
 class _FakeASR:
-    def __init__(self, texts: dict[str, str], confidence: float = 1.0):
+    def __init__(
+        self,
+        texts: dict[str, str],
+        confidence: float = 1.0,
+        segments: dict[str, list[dict]] | None = None,
+    ):
         self.texts = dict(texts)
         self.confidence = confidence
+        self.segments = dict(segments) if segments else None
 
     def transcribe_window(self, wav_path, language, key=None):
         return Transcription(
@@ -47,7 +53,27 @@ class _FakeASR:
             seconds=0.0,
             model="fake",
             mock=False,
+            segments=(
+                self.segments[key] if self.segments and key in self.segments else None
+            ),
         )
+
+
+def _hand_segments(cue_text: dict[str, str], text: str) -> dict[str, list[dict]]:
+    """F03 timing evidence localized to each cue's PROPOSED interval (matches
+    _hand_case geometry: proposal restores original exactly)."""
+    segments: dict[str, list[dict]] = {}
+    for i, cid in enumerate(sorted(cue_text)):
+        start = 1_000_000 + i * 10_000_000
+        win_off = max(0, start - 1_500_000)
+        segments[cid] = [
+            {
+                "start_us": start - win_off,
+                "end_us": start - win_off + 1_000_000,
+                "text": text,
+            }
+        ]
+    return segments
 
 
 class _RaisingVerifier:
@@ -103,7 +129,10 @@ def _hand_case(cue_text: dict[str, str]):
 def _validate(tmp_path, monkeypatch, cue_text, transcript, verifier, language):
     monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: transcript for cid in cue_text})
+    asr = _FakeASR(
+        {cid: transcript for cid in cue_text},
+        segments=_hand_segments(cue_text, transcript),
+    )
     acc = validator.validate_proposal(
         case,
         proposal,
@@ -125,7 +154,10 @@ def _validate2(
 ):
     monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: transcript for cid in cue_text})
+    asr = _FakeASR(
+        {cid: transcript for cid in cue_text},
+        segments=_hand_segments(cue_text, transcript),
+    )
     acc = validator.validate_proposal(
         case,
         proposal,
@@ -269,7 +301,11 @@ def _validate_conf(
 ):
     monkeypatch.setattr(validator, "extract_audio_window", lambda *a, **k: 0.1)
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: transcript for cid in cue_text}, confidence=confidence)
+    asr = _FakeASR(
+        {cid: transcript for cid in cue_text},
+        confidence=confidence,
+        segments=_hand_segments(cue_text, transcript),
+    )
     acc = validator.validate_proposal(
         case,
         proposal,

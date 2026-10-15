@@ -35,9 +35,13 @@ def test_exact_offset_recovery_residual_zero(tmp_path):
         notes="",
     )
     score = score_case(case, exact, corrupted.time_map(), None, tol)
-    assert score["counts"]["repaired"] == 3
-    assert score["counts"]["worsened_unaltered"] == 0
-    assert score["counts"]["harmful_accepted"] == 0
+    # Tool-only arm (no validator): F06 labels final-derived counts as
+    # counterfactual "if blindly applied", never as validated "accepted".
+    assert score["final_semantics"] == "unguarded_proposal_if_blindly_applied"
+    assert "accepted_nonzero" not in score["counts"]
+    assert score["counts"]["repaired_if_blindly_applied"] == 3
+    assert score["counts"]["worsened_unaltered_if_blindly_applied"] == 0
+    assert score["counts"]["harmful_if_blindly_applied"] == 0
     assert score["offset_recovery"]["residual_us"] == 0
 
 
@@ -47,7 +51,7 @@ def test_noop_proposal_keeps_injected_error(tmp_path):
     tol = Tolerances(good_us=50_000, severe_us=250_000, break_match_us=500_000)
     noop = ProposalRecord("c1", "b1-n", "noop", [], dict(corrupted.time_map()), [], "")
     score = score_case(case, noop, corrupted.time_map(), None, tol)
-    assert score["counts"]["repaired"] == 0
+    assert score["counts"]["repaired_if_blindly_applied"] == 0
     assert score["counts"]["proposals_nonzero"] == 0
     assert score["timing_errors_final_us"]["median_abs_us"] == abs(
         int(case.params["offset_us"])
@@ -73,5 +77,5 @@ def test_clean_control_shift_counts_worsened_and_harmful(tmp_path):
     )
     score = score_case(case, bad, corrupted.time_map(), None, tol)
     assert score["counts"]["harmful_proposed"] == 3
-    assert score["counts"]["harmful_accepted"] == 3
-    assert score["counts"]["severe_final"] >= 1
+    assert score["counts"]["harmful_if_blindly_applied"] == 3
+    assert score["counts"]["severe_if_blindly_applied"] >= 1

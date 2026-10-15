@@ -5,7 +5,22 @@ they are NOT calibrated production thresholds. Proposed corrections and
 automatically accepted corrections are scored separately. Clean controls and
 unaffected cues act as negative controls. Denominators are always reported.
 
-Discontinuity semantics (schema_version 2):
+Final-timeline semantics (schema_version 3, third-review F06): each score row
+carries ``final_semantics``. For an arm WITH an AcceptanceRecord (b1-va) the
+final timeline is the ACTUAL accepted output and counts use the accepted
+names (``accepted_nonzero``, ``harmful_accepted``, ``severe_final``,
+``repaired``, ``worsened_unaltered``). For an arm WITHOUT any validator
+(tool-only arms) the "final" is the raw proposal; scoring it is a useful
+counterfactual, but calling it "accepted" implied a safety gate that never
+ran: schema 3 labels those measurements ``*_if_blindly_applied``
+(``if_blindly_applied_nonzero``, ``harmful_if_blindly_applied``,
+``severe_if_blindly_applied``, ``repaired_if_blindly_applied``,
+``worsened_unaltered_if_blindly_applied``). ``*_proposed`` keys remain the
+proposal-domain comparison in both cases. Schema 2 rows (where unguarded
+proposals were counted as "accepted") are legacy: reports label them and
+never mix them into schema-3 comparisons silently.
+
+Discontinuity semantics (schema_version 3):
 - Candidate-implied breakpoints come from the candidate's PROPOSED corrections
   only: per-cue applied correction d(cid) = proposed_onset - corrupted_onset
   (no proposal entry -> d = 0); a breakpoint is implied at the ORIGINAL onset
@@ -13,6 +28,17 @@ Discontinuity semantics (schema_version 2):
   more than jump_threshold_us = max(2 * good_us, BREAK_JUMP_FLOOR_US = 250 ms).
   An unchanged/no-op candidate therefore implies zero breakpoints and gets no
   detection credit (residual steps are NOT detection).
+- Local isolated corrections (third-review F04): group the applied-correction
+  sequence into maximal runs of equal values. A run that is flanked on BOTH
+  sides by runs of the SAME value is a transient (short-and-reversing) block:
+  the candidate adjusted isolated cues locally and returned to the surrounding
+  offset. Its boundaries are NOT release discontinuities, so the implied
+  breakpoints at the entering and exiting steps are suppressed and the cues
+  inside such a run are counted additively as ``local_cue_adjustments``
+  (with their cue ids). A sustained step (the value persists to a sequence
+  edge, or the two sides differ) stays a change-point claim, so real regional
+  discontinuities keep their false-positive penalty and a perfect inverse of
+  an isolated S04 cue shift no longer scores as two false release breaks.
 - Detection credit uses BRACKETING intervals, not a spurious sub-tolerance time
   estimate: an implied break from the a->b cue-anchor step certifies the
   DISCONTINUITY LOCATION, i.e. that the repair boundary falls between adjacent
@@ -56,7 +82,7 @@ from .manifests import AcceptanceRecord, CaseManifest, ProposalRecord
 
 BREAK_JUMP_FLOOR_US = 250_000
 OFFSET_RECOVERY_STATUSES = ("1:1-order-preserving", "noop")
-SCORE_SCHEMA_VERSION = 2
+SCORE_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -116,6 +142,18 @@ def score_case(
     original = {cid: (int(s), int(e)) for cid, (s, e) in case.original_times_us.items()}
     cues = sorted(set(original) | set(corrupted_times))
 
+    # F06: "accepted" labels are reserved for an arm with a real AcceptanceRecord.
+    # Tool-only arms have NO validator: their raw proposal scored as the final
+    # timeline is a counterfactual (what would happen if it were blindly
+    # applied), and schema 3 names every final-derived measurement that way.
+    has_acceptance = acceptance is not None
+    blind = "" if has_acceptance else "_if_blindly_applied"
+    final_semantics = (
+        "accepted_output" if has_acceptance else "unguarded_proposal_if_blindly_applied"
+    )
+    accepted_label = "accepted" if has_acceptance else "if_blindly_applied"
+    final_label = "final" if has_acceptance else "if_blindly_applied"
+
     proposed_times = proposal.proposed_times_us
     if acceptance:
         final_times = acceptance.accepted_times_us
@@ -164,13 +202,13 @@ def score_case(
             if abs(injected[0]) > tol.good_us:
                 altered.append(cid)
                 if abs(onset_err_final) <= tol.good_us:
-                    rec["repaired"] = True
+                    rec[f"repaired{blind}"] = True
                 if abs(onset_err_proposed) <= tol.good_us:
                     rec["repaired_proposed"] = True
             else:
                 unaltered.append(cid)
                 if abs(onset_err_final) > tol.good_us:
-                    rec["worsened"] = True
+                    rec[f"worsened{blind}"] = True
                 if abs(onset_err_proposed) > tol.good_us:
                     rec["worsened_proposed"] = True
             if (
@@ -179,9 +217,9 @@ def score_case(
             ):
                 rec["harmful_proposed"] = True
             if abs(onset_err_final) > abs(onset_err_corrupted) + tol.good_us:
-                rec["harmful_accepted"] = True
+                rec[f"harmful_{accepted_label}"] = True
             if abs(onset_err_final) > tol.severe_us:
-                rec["severe_final"] = True
+                rec[f"severe_{final_label}"] = True
         per_cue[cid] = rec
 
     nonzero_proposals = sum(
@@ -234,6 +272,38 @@ def score_case(
         prev_offset = offset
     proposed_edges = sorted(set(proposed_edges))
 
+    # F04: stable-support classification of applied corrections. Group the
+    # sequence (in original onset order) into maximal runs of equal applied
+    # correction. A run flanked on BOTH sides by runs of the SAME value is a
+    # transient local-cue adjustment block: the candidate moved isolated cues
+    # and reversed back to the surrounding offset, so its entering/exiting
+    # steps are NOT release discontinuities. A sustained step (the new value
+    # persists to a sequence edge, or the two sides differ) keeps its claim.
+    run_ids: list[int] = []
+    runs: list[dict] = []
+    for cid in break_order:
+        v = applied_correction(cid)
+        if runs and runs[-1]["value"] == v:
+            runs[-1]["cue_ids"].append(cid)
+            run_ids.append(len(runs) - 1)
+        else:
+            runs.append({"value": v, "cue_ids": [cid]})
+            run_ids.append(len(runs) - 1)
+    transient = [False] * len(runs)
+    for i in range(1, len(runs) - 1):
+        if runs[i - 1]["value"] == runs[i + 1]["value"]:
+            transient[i] = True
+    # Only cues whose applied correction actually deviates from the flanking
+    # value are local adjustments; a zero-run sandwiched between two equal
+    # shifted blocks (oscillation) suppresses its transient boundaries, but its
+    # untouched cues were never adjusted and are not counted.
+    local_cue_ids = sorted(
+        cid
+        for i, run in enumerate(runs)
+        if transient[i] and run["value"] != 0
+        for cid in run["cue_ids"]
+    )
+
     # A step in applied correction between consecutive cue anchors (a, b]
     # implies a break; the gap is bounded by onset(a), onset(b) and sub-divided
     # by proposed_edges strictly inside it. implied_breakpoint_times_us keeps
@@ -241,8 +311,13 @@ def score_case(
     # per-boundary sub-brackets used for one-to-one detection credit.
     implied_breaks: list[int] = []
     claims: list[tuple[int, int, int]] = []
-    for a, b in itertools.pairwise(break_order):
+    for k, (a, b) in enumerate(itertools.pairwise(break_order)):
         if abs(applied_correction(b) - applied_correction(a)) > jump_threshold_us:
+            ra, rb = run_ids[k], run_ids[k + 1]
+            if transient[ra] or transient[rb]:
+                # Transient block boundary: a local cue adjustment, not a
+                # sustained release change-point (no false-positive claim).
+                continue
             lo = int(per_cue[a]["original_us"][0])
             hi = int(per_cue[b]["original_us"][0])
             implied_breaks.append(hi)
@@ -346,6 +421,7 @@ def score_case(
         "scenario": case.scenario,
         "candidate_id": proposal.candidate_id,
         "mapping_status": proposal.mapping_status,
+        "final_semantics": final_semantics,
         "tolerances": tol.to_dict(),
         "denominators": {
             "total_cues": len(cues),
@@ -361,23 +437,31 @@ def score_case(
         "timing_errors_proposed_end_us": _stats([abs(e) for e in end_errors_proposed]),
         "timing_errors_final_end_us": _stats([abs(e) for e in end_errors_final]),
         "counts": {
-            "repaired": sum(1 for r in per_cue.values() if r.get("repaired")),
+            f"repaired{blind}": sum(
+                1 for r in per_cue.values() if r.get(f"repaired{blind}")
+            ),
             "repaired_proposed": sum(
                 1 for r in per_cue.values() if r.get("repaired_proposed")
             ),
-            "worsened_unaltered": sum(1 for r in per_cue.values() if r.get("worsened")),
+            f"worsened_unaltered{blind}": sum(
+                1 for r in per_cue.values() if r.get(f"worsened{blind}")
+            ),
             "worsened_unaltered_proposed": sum(
                 1 for r in per_cue.values() if r.get("worsened_proposed")
             ),
             "harmful_proposed": sum(
                 1 for r in per_cue.values() if r.get("harmful_proposed")
             ),
-            "harmful_accepted": sum(
-                1 for r in per_cue.values() if r.get("harmful_accepted")
+            f"harmful_{accepted_label}": sum(
+                1 for r in per_cue.values() if r.get(f"harmful_{accepted_label}")
             ),
-            "severe_final": sum(1 for r in per_cue.values() if r.get("severe_final")),
+            f"severe_{final_label}": sum(
+                1 for r in per_cue.values() if r.get(f"severe_{final_label}")
+            ),
             "proposals_nonzero": nonzero_proposals,
-            "accepted_nonzero": nonzero_accepted,
+            (
+                "accepted_nonzero" if has_acceptance else "if_blindly_applied_nonzero"
+            ): nonzero_accepted,
             "abstained_regions": len(regions)
             if proposal.mapping_status
             in (
@@ -413,6 +497,17 @@ def score_case(
             "unresolved_true_breakpoints": unresolved_true,
             "resolved_true_breakpoints": resolved_true,
             "true_breakpoints_without_straddle_pair": no_straddle_pair,
+            "local_cue_adjustments": len(local_cue_ids),
+            "local_cue_adjusted_cue_ids": local_cue_ids,
+            "transient_rule": (
+                "a maximal run of equal applied corrections flanked on BOTH "
+                "sides by runs of the SAME value is a transient local-cue "
+                "adjustment block (isolated cue shifts reversed back to the "
+                "surrounding offset): its entering/exiting steps are not "
+                "release discontinuities and its cues count as "
+                "local_cue_adjustments; a sustained step (value persists to a "
+                "sequence edge, or the two sides differ) keeps its claim"
+            ),
             "matching_rule": (
                 "an implied break from the a->b cue-anchor step is credited to "
                 "the true breakpoints in the bracketing interval "

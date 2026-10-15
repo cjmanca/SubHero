@@ -33,6 +33,14 @@ class Transcription:
     ``confidence`` is the backend's reliability signal on the log-probability
     scale used by the benchmark; ``MISSING_CONFIDENCE_SENTINEL`` means the
     backend reported NO reliability signal for this window.
+
+    ``segments`` (F03 timing evidence) carries time-local utterances when the
+    backend provides them: a list of ``{"start_us", "end_us", "text"}`` whose
+    timestamps are relative to the START of the extracted window (verbose_json
+    ``segments``). ``None`` means the backend gave no usable segment
+    timestamps; validators then have NO timing correspondence evidence and
+    must abstain from automatic acceptance (text presence in the enlarged
+    padded window is not proof the utterance was spoken when proposed).
     """
 
     text: str
@@ -40,6 +48,7 @@ class Transcription:
     seconds: float
     model: str
     mock: bool = False
+    segments: list[dict] | None = None
 
 
 @dataclass
@@ -62,29 +71,37 @@ class MockTranscriber:
     """Test double; requires explicit canned utterances. Never used for real reports.
 
     ``confidence`` is test-configurable (default 1.0) so tests can exercise the
-    reliability gate; production wiring and the HTTP backend are unaffected."""
+    reliability gate; ``segments`` optionally provides canned per-key segment
+    timestamp lists (F03 timing evidence) exactly like the utterance map.
+    Production wiring and the HTTP backend are unaffected."""
 
     def __init__(
         self,
         utterances: dict[str, str],
         model: str = "mock",
         confidence: float = 1.0,
+        segments: dict[str, list[dict]] | None = None,
     ):
         self.utterances = dict(utterances)
         self.model = model
         self.confidence = confidence
+        self.segments = dict(segments) if segments else None
 
     def transcribe_window(
         self, wav_path: Path, language: str, key: str | None = None
     ) -> Transcription:
         started = time.monotonic()
-        text = self.utterances.get(key or str(wav_path), "")
+        k = key or str(wav_path)
+        text = self.utterances.get(k, "")
         return Transcription(
             text=text,
             confidence=self.confidence,
             seconds=time.monotonic() - started,
             model=self.model,
             mock=True,
+            segments=(
+                list(self.segments[k]) if self.segments and k in self.segments else None
+            ),
         )
 
 
@@ -136,11 +153,32 @@ class HTTPLocalTranscriber:
             if segments
             else MISSING_CONFIDENCE_SENTINEL
         )
+        # F03: verbose_json segment timestamps are the time-local evidence the
+        # validator needs. Timestamps are relative to the window file start;
+        # segments with missing/negative/inverted times are not usable evidence
+        # and are dropped.
+        timed: list[dict] = []
+        for seg in segments:
+            try:
+                start_us = round(float(seg["start"]) * 1_000_000)
+                end_us = round(float(seg["end"]) * 1_000_000)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start_us < 0 or end_us < start_us:
+                continue
+            timed.append(
+                {
+                    "start_us": start_us,
+                    "end_us": end_us,
+                    "text": str(seg.get("text", "")),
+                }
+            )
         return Transcription(
             text=payload.get("text", ""),
             confidence=confidence,
             seconds=secs,
             model=self.model,
+            segments=timed or None,
         )
 
 
@@ -196,13 +234,16 @@ class MockSemanticVerifier:
     """Test double returning canned verdicts keyed by subtitle text. Test-only; the CLI never wires it.
 
     Records the language hints it receives so tests can assert the validator
-    passes the resolved subtitle/audio identities (never a hardcoded "und").
+    passes the resolved subtitle/audio identities (never a hardcoded "und"),
+    and the transcript text it was asked to judge (F03: tests assert the
+    in-interval segment text is what gets verified).
     """
 
     def __init__(self, answers: dict[str, str], model: str = "mock-verifier"):
         self.answers = dict(answers)
         self.model = model
         self.calls: list[tuple[str, str, str]] = []
+        self.transcripts: list[str] = []
 
     def verdict(
         self,
@@ -215,6 +256,7 @@ class MockSemanticVerifier:
         self.calls.append(
             (subtitle_text, subtitle_language_hint, transcript_language_hint)
         )
+        self.transcripts.append(transcript_text)
         return SemanticVerdict(
             verdict=self.answers.get(subtitle_text, "unknown"),
             seconds=time.monotonic() - started,

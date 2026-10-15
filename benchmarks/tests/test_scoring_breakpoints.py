@@ -176,7 +176,7 @@ def test_noop_gets_zero_breakpoint_credit_on_hand_s03():
     )
     score = score_case(case, noop, corrupted, None, TOL)
     dis = score["discontinuities"]
-    assert score["schema_version"] == 2
+    assert score["schema_version"] == 3
     assert dis["jump_threshold_us"] == max(2 * GOOD, 250_000)
     assert dis["true_breakpoints"] == 2
     assert dis["detected_breakpoints"] == 0
@@ -235,7 +235,11 @@ def test_perfect_piecewise_repair_matches_all_true_breakpoints():
     assert sorted(dis["implied_breakpoint_times_us"]) == [10_000_000, 30_000_000]
     assert dis["matched_true_breakpoints"] == len(case.true_breakpoints_us)
     assert dis["false_positive_breakpoints"] == 0
-    assert score["counts"]["repaired"] == score["denominators"]["altered_cues"] == 4
+    assert (
+        score["counts"]["repaired_if_blindly_applied"]
+        == score["denominators"]["altered_cues"]
+        == 4
+    )
     assert dis["resolved_true_breakpoints"] == 2
     assert dis["unresolved_true_breakpoints"] == 0
 
@@ -308,12 +312,12 @@ def test_proposal_touching_synchronized_cues_counts_worsened_and_harmful():
     )
     score = score_case(case, rec, corrupted, None, TOL)
     counts = score["counts"]
-    assert counts["worsened_unaltered"] == 2
+    assert counts["worsened_unaltered_if_blindly_applied"] == 2
     assert counts["worsened_unaltered_proposed"] == 2
     assert counts["harmful_proposed"] == 2
-    assert counts["harmful_accepted"] == 2
-    assert counts["severe_final"] >= 2
-    assert counts["repaired"] == 4
+    assert counts["harmful_if_blindly_applied"] == 2
+    assert counts["severe_if_blindly_applied"] >= 2
+    assert counts["repaired_if_blindly_applied"] == 4
     # Implied breakpoints stay at the two true locations only (the +5 s pair
     # steps at the 10 s boundary, which is a true breakpoint; at 5 s/40 s the
     # corrections are flat, so no extra credit).
@@ -627,6 +631,7 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
     # would have embedded; a score with no such run is dropped (see
     # test_provenance_acceptance for the dropped-unbound regression).
     v2["input_fingerprint"] = "a" * 64
+    v2["proposal_sha256"] = "p" * 64
     v1 = {
         "schema_version": 1,
         "case_id": "legacy-case",
@@ -671,6 +676,7 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
             "schema_version": 2,
             "status": "1:1-order-preserving",
             "input_fingerprint": "a" * 64,
+            "proposal_sha256": "p" * 64,
         }
     ]
     text = build_report(["hand-s03", "legacy-case"], runs_hand, [v2, v1], {})
@@ -712,6 +718,7 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
         TOL,
     )
     v2_s01["input_fingerprint"] = "b" * 64
+    v2_s01["proposal_sha256"] = "q" * 64
     runs_s01 = [
         {
             "case_id": s01_case.case_id,
@@ -719,6 +726,7 @@ def test_report_renders_v2_fields_and_skips_v1_scores():
             "schema_version": 2,
             "status": "1:1-order-preserving",
             "input_fingerprint": "b" * 64,
+            "proposal_sha256": "q" * 64,
         }
     ]
     text = build_report([s01_case.case_id], runs_s01, [v2_s01], {})

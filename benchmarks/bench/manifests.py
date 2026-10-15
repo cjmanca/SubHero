@@ -122,6 +122,11 @@ class AcceptanceRecord:
     sample_cue_ids: list[str]
     asr_seconds: float
     asr_calls: int
+    # Third-review F07: semantic-verifier wall time and call counts are
+    # recorded SEPARATELY from transcription; asr_seconds keeps its ASR-only
+    # meaning. Additive defaults keep pre-F07 acceptance.json readable.
+    semantic_seconds: float = 0.0
+    verifier_calls: int = 0
     notes: str = ""
     schema_version: int = SCHEMA_VERSION
 

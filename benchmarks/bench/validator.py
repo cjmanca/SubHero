@@ -35,6 +35,24 @@ evidence (not an acceptance path) and does not depend on transcript
 reliability. ASR-reliability abstentions are recorded with their own note
 counter so a later targeted-re-sampling feature (explicitly out of scope) can
 act on the abstention reason.
+
+Timing-correspondence gate (P1 fix F03, third review): the extracted window is
+the proposed interval PLUS 1.5 s of padding on each side, so an ASR transcript
+of the whole window proves only that matching speech exists SOMEWHERE NEARBY
+(semantic_content_present_in_window), never that it was spoken AT the proposed
+time. Acceptance therefore requires TIME-LOCAL evidence: when the ASR backend
+provides per-segment timestamps (verbose_json ``segments``; the targeted
+transcription endpoint already returns them — no new aligner architecture is
+needed), only segments intersecting the proposed interval within
+TIMING_TOLERANCE_US may support an automatic accept, and a match found only in
+the padding (or both in-interval and in padding, i.e. repeated/adjacent
+dialogue with ambiguous position) abstains. Cross-language verifier accepts
+judge the OVERLAPPING segments' text, not the whole padded window. When a
+backend provides NO usable segment timestamps, a text-only window match can
+never be promoted to timing proof: the sample abstains (measured outcome)
+and is counted, and abstained regions record
+``semantic_content_present_in_window`` while accepted regions record
+``timing_correspondence_verified``.
 """
 
 from __future__ import annotations
@@ -52,6 +70,11 @@ PAD_US = 1_500_000
 MIN_MATCH_RATIO = 0.45
 MIN_CONFIDENCE = -0.5
 SCRIPT_MAJORITY = 0.5
+# F03: documented time-local tolerance. A segment supports an automatic
+# accept only when it positively overlaps the proposed subtitle interval
+# widened by this slack. It is NOT the 1.5 s window padding (padding presence
+# is content evidence only, never timing proof).
+TIMING_TOLERANCE_US = 500_000
 # Script classes used for dominant-script detection. Lexical comparison is
 # meaningful evidence only when both sides share the same language; a majority-
 # script contrast is a *signal* that lexical comparison is meaningless, never
@@ -284,6 +307,80 @@ def cue_region(cue_start_us: int, regions: list[dict]) -> int | None:
     return None
 
 
+def _window_segments(result) -> list[dict]:
+    """Usable per-segment timestamps from a transcription (F03), if any.
+
+    Timestamps are relative to the extracted window start; segments without
+    interpretable non-inverted times are dropped (missing timestamps are
+    MISSING evidence, never guessed positions).
+    """
+    segs = getattr(result, "segments", None)
+    if not segs:
+        return []
+    out: list[dict] = []
+    for seg in segs:
+        try:
+            start_us = int(seg["start_us"])
+            end_us = int(seg["end_us"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start_us < 0 or end_us < start_us:
+            continue
+        out.append(
+            {"start_us": start_us, "end_us": end_us, "text": str(seg.get("text", ""))}
+        )
+    return sorted(out, key=lambda s: s["start_us"])
+
+
+def _segment_timing(
+    subtitle_text: str,
+    segments: list[dict],
+    win_off_us: int,
+    start_us: int,
+    end_us: int,
+    tol_us: int = TIMING_TOLERANCE_US,
+) -> dict:
+    """Split window segments into in-interval vs padding; match each side (F03).
+
+    A segment is IN the proposed interval only when it POSITIVELY intersects
+    ``[start_us - tol_us, end_us + tol_us]`` (the documented time-local
+    slack; touching-at-a-point adjacency is not overlap). Candidate joins
+    cover a cue spanning two consecutive in-segments; a join never mixes an
+    in-segment with a padding segment, so padding text can never lend
+    time-local support.
+    """
+    overlap: list[dict] = []
+    padding: list[dict] = []
+    for seg in segments:
+        media_start = win_off_us + seg["start_us"]
+        media_end = win_off_us + seg["end_us"]
+        if media_start < end_us + tol_us and media_end > start_us - tol_us:
+            overlap.append(seg)
+        else:
+            padding.append(seg)
+
+    def best(cands: list[list[dict]]) -> float:
+        score = 0.0
+        for cand in cands:
+            joined = " ".join(s["text"] for s in cand)
+            score = max(score, semantic_match(subtitle_text, joined))
+        return score
+
+    in_cands: list[list[dict]] = [[s] for s in overlap]
+    if len(overlap) > 1:
+        in_cands.append(overlap)
+        in_cands += [overlap[i : i + 2] for i in range(len(overlap) - 1)]
+    pad_cands: list[list[dict]] = [[s] for s in padding]
+    if len(padding) > 1:
+        pad_cands.append(padding)
+    return {
+        "in_ratio": best(in_cands) if in_cands else 0.0,
+        "padding_ratio": best(pad_cands) if pad_cands else 0.0,
+        "n_overlap": len(overlap),
+        "overlap_text": " ".join(s["text"] for s in overlap),
+    }
+
+
 def plan_samples(
     case: CaseManifest,
     proposal: ProposalRecord,
@@ -354,6 +451,20 @@ def validate_proposal(
     ONLY for cross-language samples; transcription and verification are
     independently configured boundaries.
 
+    F03 timing-correspondence gate: window extraction covers the proposed
+    interval plus 1.5 s padding on each side, so a transcript of the whole
+    window proves only that matching speech exists NEARBY. Automatic
+    acceptance requires time-local evidence: an ASR segment with usable
+    timestamps that positively overlaps the proposed interval within
+    TIMING_TOLERANCE_US (cross-language accepts are decided on the
+    overlapping segments' text). Matches found only in the padding, matches
+    that are ambiguous between interval and padding (repeated/adjacent
+    dialogue), and windows whose backend reports no usable segment
+    timestamps all ABSTAIN — text presence in the enlarged window is recorded
+    as ``semantic_content_present_in_window`` and never promoted to
+    ``timing_correspondence_verified``. This stays a B1-targeted experiment;
+    no forced-alignment pipeline is introduced.
+
     ``language`` is the resolved spoken/audio language hint and
     ``subtitle_language`` the resolved target-subtitle hint (defaults to "und"
     so existing call sites keep working). Routing keys on the verified identity
@@ -401,11 +512,21 @@ def validate_proposal(
     ensure_scratch_path(scratch_dir)
     asr_seconds = 0.0
     asr_calls = 0
+    # F07 (third review): semantic-verification wall time and call counts are
+    # tracked SEPARATELY; asr_seconds is transcription-only so component costs
+    # compare fairly.
+    semantic_seconds = 0.0
+    verifier_calls = 0
     verdicts: dict[int, list[str]] = {}
     no_verifier_cross_lang = 0
     verifier_no_verdict = 0
     identity_unknown_abstentions = 0
     low_confidence_abstentions = 0
+    timing_evidence_unavailable = 0
+    padding_only_matches = 0
+    multi_utterance_ambiguity = 0
+    timing_unverified_match = 0
+    region_content_present: dict[int, bool] = {}
     mock_verifier_used = False
     audio_identity = normalize_language(language)
     subtitle_identity = normalize_language(subtitle_language)
@@ -416,23 +537,31 @@ def validate_proposal(
     )
 
     def run_verifier(
-        region: int, subtitle_text: str, transcript_text: str, reliable: bool | None
+        region: int,
+        subtitle_text: str,
+        transcript_text: str,
+        reliable: bool | None,
+        timing_verified: bool,
     ) -> None:
         """Send one sample to the semantic verifier boundary and record its verdict.
 
         The verifier is translation-tolerant and receives the RESOLVED language
         hints (never a hardcoded "und"). match + usable transcript reliability
-        (F07 gate) -> accept; match over an unreliable/no-signal transcript ->
-        abstain (recorded as an ASR-reliability abstention, never an accept);
-        no_match -> reject (verifier evidence, not an acceptance path);
-        unknown/exception -> abstain (no usable verdict)."""
-        nonlocal asr_seconds, verifier_no_verdict, low_confidence_abstentions
-        nonlocal mock_verifier_used
+        (F07 gate) + time-local evidence (F03: the judged transcript text
+        covers the proposed interval, not the whole padded window) -> accept;
+        a match without time-local evidence is
+        ``semantic_content_present_in_window`` and abstains, never accepts
+        (recorded as its own abstention counter); no_match -> reject (verifier
+        evidence, not an acceptance path); unknown/exception -> abstain (no
+        usable verdict)."""
+        nonlocal semantic_seconds, verifier_no_verdict, low_confidence_abstentions
+        nonlocal mock_verifier_used, timing_unverified_match, verifier_calls
+        verifier_calls += 1
         try:
             sv = verifier.verdict(
                 subtitle_text, transcript_text, subtitle_language, language
             )
-            asr_seconds += sv.seconds
+            semantic_seconds += sv.seconds
         except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
             verdicts.setdefault(region, []).append("abstain")
             verifier_no_verdict += 1
@@ -446,15 +575,24 @@ def validate_proposal(
                 f"{cid}: mock semantic verifier used; test-only\n"
             )
         if sv.verdict == "match":
-            if reliable is True:
-                verdicts.setdefault(region, []).append("accept")
-            else:
+            if reliable is not True:
                 verdicts.setdefault(region, []).append("abstain")
                 low_confidence_abstentions += 1
                 (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                     f"{cid}: verifier match not accepted: ASR reliability signal "
                     "missing/unusable; abstained\n"
                 )
+            elif not timing_verified:
+                verdicts.setdefault(region, []).append("abstain")
+                timing_unverified_match += 1
+                region_content_present[region] = True
+                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                    f"{cid}: verifier match over the padded window only: "
+                    "semantic_content_present_in_window, timing correspondence "
+                    "unverified; abstained\n"
+                )
+            else:
+                verdicts.setdefault(region, []).append("accept")
         elif sv.verdict == "no_match":
             verdicts.setdefault(region, []).append("reject")
         else:
@@ -486,8 +624,14 @@ def validate_proposal(
         asr_seconds += result.seconds
         asr_calls += 1
         subtitle_text = cue_text.get(cid, "")
-        ratio = semantic_match(subtitle_text, result.text)
         reliable = _transcript_reliable(result)
+        segments = _window_segments(result)
+        win_off_us = max(0, start_us - PAD_US)
+        timing = (
+            _segment_timing(subtitle_text, segments, win_off_us, start_us, end_us)
+            if segments
+            else None
+        )
         if result.mock:
             verdicts.setdefault(region, []).append("abstain")
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
@@ -496,13 +640,32 @@ def validate_proposal(
         elif is_cross_language(subtitle_text, result.text, language, subtitle_language):
             # Lexical score is never accept-support and never reject evidence
             # across languages; only the semantic verifier boundary decides.
+            # F03: the verifier judges the segments that overlap the proposed
+            # interval (time-local candidates). With no in-interval utterance
+            # at all, a padded-window match proves only
+            # semantic_content_present_in_window and abstains in run_verifier.
             # The F07 reliability gate applies to the verifier's ACCEPT verdict
             # inside run_verifier; no_match stays a verifier-evidence reject.
             if verifier is None:
                 verdicts.setdefault(region, []).append("abstain")
                 no_verifier_cross_lang += 1
                 continue
-            run_verifier(region, subtitle_text, result.text, reliable)
+            if timing is not None and timing["n_overlap"] > 0:
+                run_verifier(
+                    region,
+                    subtitle_text,
+                    timing["overlap_text"],
+                    reliable,
+                    timing_verified=True,
+                )
+            else:
+                run_verifier(
+                    region,
+                    subtitle_text,
+                    result.text,
+                    reliable,
+                    timing_verified=False,
+                )
         elif reliable is not True:
             # Shared quality gate (F07): a lexical-path accept requires a usable
             # ASR reliability signal; a missing sentinel / low / uninterpretable
@@ -513,24 +676,76 @@ def validate_proposal(
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                 f"{cid}: ASR reliability signal missing/unusable; abstained\n"
             )
-        elif same_identity:
-            # Verified same-language pair with usable reliability: lexical
-            # agreement is accept-support and lexical disagreement is genuine
-            # CONTRADICTION evidence.
-            if ratio >= MIN_MATCH_RATIO:
-                verdicts.setdefault(region, []).append("accept")
-            else:
-                verdicts.setdefault(region, []).append("reject")
-        elif ratio >= MIN_MATCH_RATIO:
-            # Identity not fully verified and scripts do not contrast: positive
-            # lexical support with a usable reliability signal is valid accept
-            # evidence.
+        elif timing is None:
+            # F03: the backend reported no usable segment timestamps. Text
+            # presence in the enlarged padded window is NOT timing proof; the
+            # sample abstains (never auto-accept, and never a padded-window
+            # text-only reject either).
+            verdicts.setdefault(region, []).append("abstain")
+            timing_evidence_unavailable += 1
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: ASR backend provided no segment timestamps; text "
+                "presence in the padded window is content evidence only "
+                "(semantic_content_present_in_window), not "
+                "timing_correspondence_verified; abstained\n"
+            )
+        elif (
+            timing["in_ratio"] >= MIN_MATCH_RATIO
+            and timing["padding_ratio"] < MIN_MATCH_RATIO
+        ):
+            # F03: a matching utterance overlaps the proposed interval within
+            # the documented tolerance and NO padding-only match competes for
+            # the same text: timing correspondence verified -> accept.
             verdicts.setdefault(region, []).append("accept")
+        elif timing["in_ratio"] >= MIN_MATCH_RATIO:
+            # Matches BOTH in-interval and in padding: repeated/adjacent
+            # dialogue makes the position ambiguous; abstain, keep original.
+            verdicts.setdefault(region, []).append("abstain")
+            multi_utterance_ambiguity += 1
+            region_content_present[region] = True
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: matching utterances in the proposed interval AND in "
+                "the window padding; position ambiguous; abstained\n"
+            )
+        elif timing["padding_ratio"] >= MIN_MATCH_RATIO:
+            # The matching line is spoken only in the 1.5 s padding outside
+            # the proposed interval: content present, timing correspondence
+            # NOT verified (this is exactly the wrongly-shifted-cue accept the
+            # review reproduced); abstain.
+            verdicts.setdefault(region, []).append("abstain")
+            padding_only_matches += 1
+            region_content_present[region] = True
+            (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                f"{cid}: matching utterance found only in window padding; "
+                "semantic_content_present_in_window, timing correspondence "
+                "unverified; abstained\n"
+            )
+        elif same_identity:
+            # Verified same-language pair with usable reliability and segment
+            # evidence: NO utterance in the window (in-interval or padding)
+            # matches the subtitle text -> genuine CONTRADICTION evidence.
+            verdicts.setdefault(region, []).append("reject")
         elif verifier is not None:
             # Identity not verified: low overlap is NOT sufficient negative
-            # evidence. Route to the verifier when configured (never reject on
-            # an unverified identity without verifier evidence).
-            run_verifier(region, subtitle_text, result.text, reliable)
+            # evidence. Route to the verifier when configured, judging the
+            # in-interval candidates when available (never reject on an
+            # unverified identity without verifier evidence).
+            if timing["n_overlap"] > 0:
+                run_verifier(
+                    region,
+                    subtitle_text,
+                    timing["overlap_text"],
+                    reliable,
+                    timing_verified=True,
+                )
+            else:
+                run_verifier(
+                    region,
+                    subtitle_text,
+                    result.text,
+                    reliable,
+                    timing_verified=False,
+                )
         else:
             verdicts.setdefault(region, []).append("abstain")
             identity_unknown_abstentions += 1
@@ -550,19 +765,32 @@ def validate_proposal(
                 {**region, "reason": "semantic mismatch in samples" + mock_tag}
             )
         elif all(v == "accept" for v in verdict):
+            # F03: an accepted region carries explicit evidence labels — the
+            # matching utterances were time-local to the proposed interval
+            # (within TIMING_TOLERANCE_US), not merely present in the window.
             accepted_regions.append(
-                {**region, "reason": "all samples semantically matched" + mock_tag}
+                {
+                    **region,
+                    "reason": (
+                        "all samples semantically matched with time-local ASR "
+                        "segment evidence at the proposed interval" + mock_tag
+                    ),
+                    "timing_correspondence_verified": True,
+                    "semantic_content_present_in_window": True,
+                }
             )
             for cid, (ps, pe) in proposal.proposed_times_us.items():
                 if cue_region(corrupted_times[cid][0], [region]) == 0:
                     accepted_times[cid] = (ps, pe)
         else:
-            abstained_regions.append(
-                {
-                    **region,
-                    "reason": "mixed samples (accept+abstain); insufficient evidence",
-                }
-            )
+            abstained = {
+                **region,
+                "reason": "mixed samples (accept+abstain); insufficient evidence",
+            }
+            if region_content_present.get(i):
+                abstained["semantic_content_present_in_window"] = True
+                abstained["timing_correspondence_verified"] = False
+            abstained_regions.append(abstained)
 
     usable_verdicts = sum(
         1 for vs in verdicts.values() for v in vs if v in ("accept", "reject")
@@ -598,10 +826,44 @@ def validate_proposal(
             "(configure --language/--subtitle-language plus a semantic verifier "
             "to decide); abstained"
         )
+    if timing_evidence_unavailable:
+        notes_parts.append(
+            f"{timing_evidence_unavailable} samples: ASR backend provided no "
+            "usable segment timestamps for the padded window; text presence in "
+            "the enlarged window is semantic_content_present_in_window, never "
+            "timing_correspondence_verified; abstained (a bounded per-segment "
+            "verifier path consumes verbose_json timestamps; a full forced-"
+            "aligner pipeline is explicitly out of scope for B1-VA)"
+        )
+    if padding_only_matches:
+        notes_parts.append(
+            f"{padding_only_matches} samples: the matching utterance was found "
+            "only in the 1.5 s window padding outside the proposed interval "
+            "(semantic_content_present_in_window, timing correspondence "
+            "unverified — the wrongly-shifted-cue accept the review "
+            "reproduced); abstained"
+        )
+    if multi_utterance_ambiguity:
+        notes_parts.append(
+            f"{multi_utterance_ambiguity} samples: the subtitle text matched "
+            "both at the proposed interval and in the window padding "
+            "(repeated/adjacent dialogue; utterance position ambiguous); "
+            "abstained"
+        )
+    if timing_unverified_match:
+        notes_parts.append(
+            f"{timing_unverified_match} cross-language samples: the semantic "
+            "verifier matched the padded window without time-local segment "
+            "evidence; abstained (never accepted)"
+        )
     if mock_verifier_used:
         notes_parts.append("mock semantic verifier used (test-only)")
     no_evidence = (
-        no_verifier_cross_lang + verifier_no_verdict + identity_unknown_abstentions
+        no_verifier_cross_lang
+        + verifier_no_verdict
+        + identity_unknown_abstentions
+        + timing_evidence_unavailable
+        + timing_unverified_match
     ) > 0
     if (
         not accepted_regions
@@ -629,5 +891,7 @@ def validate_proposal(
         sample_cue_ids=samples,
         asr_seconds=asr_seconds,
         asr_calls=asr_calls,
+        semantic_seconds=semantic_seconds,
+        verifier_calls=verifier_calls,
         notes="; ".join(notes_parts),
     )

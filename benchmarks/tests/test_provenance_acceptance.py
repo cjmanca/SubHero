@@ -258,7 +258,8 @@ def test_genuine_b1va_flow_scores_with_bound_acceptance(
     assert _score(root, "GVA", "b1-va") == 0
     run = _load(va_dir / "run.json")
     score = _load(va_dir / "score.json")
-    assert score["schema_version"] == 2
+    assert score["schema_version"] == 3
+    assert score["final_semantics"] == "accepted_output"
     assert score["input_fingerprint"] == run["input_fingerprint"]
     # Tampering the genuine acceptance bytes now refuses (rc 6), not rescores.
     tampered = va_dir / "acceptance.json"
@@ -367,10 +368,15 @@ def test_acceptance_in_non_va_arm_dir_is_ignored(tmp_path, fixture_dir):
     )
     assert _score(root, "PLNT", "b1-n") == 0
     after = _load(b1n / "score.json")
-    # Ignored: identical proposal-only result, nothing "accepted".
-    assert after["counts"]["accepted_nonzero"] == 0
+    # Ignored: identical proposal-only result, nothing "accepted". A tool-only
+    # arm scores under the F06 counterfactual names, never accepted_* keys.
+    assert after["counts"]["if_blindly_applied_nonzero"] == 0
+    assert "accepted_nonzero" not in after["counts"]
     assert after["timing_errors_final_us"] == baseline["timing_errors_final_us"]
-    assert after["counts"]["repaired"] == baseline["counts"]["repaired"]
+    assert (
+        after["counts"]["repaired_if_blindly_applied"]
+        == baseline["counts"]["repaired_if_blindly_applied"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -484,7 +490,11 @@ def test_report_drops_planted_unbound_score_and_shows_note(tmp_path, fixture_dir
     )
     assert cli.main(["--root", str(root), "report", "--case", "UNBD"]) == 0
     report = (root / "results" / "report.md").read_text(encoding="utf-8")
-    assert "dropped unbound score rows: 1" in report
+    # Round-3 R3-P1: the planted score.json lands in a directory with no
+    # admitted run.json pairing, so it is refused at admission (counted as an
+    # artifact problem), never reaching the unbound-binding path.
+    assert "no admitted run.json pairing" in report
+    assert "unreadable artifacts skipped: 1" in report
     assert "| b1-al |" not in report  # the planted row is never rendered
     assert "| b1-n |" in report  # the genuinely bound row is rendered
 
@@ -505,7 +515,8 @@ def test_report_drops_score_with_no_run_json(tmp_path, fixture_dir):
     write_json(dst / "score.json", payload)
     assert cli.main(["--root", str(root), "report", "--case", "NORUN"]) == 0
     report = (root / "results" / "report.md").read_text(encoding="utf-8")
-    assert "dropped unbound score rows: 1" in report
+    assert "no admitted run.json pairing" in report  # Round-3 R3-P1 admission
+    assert "unreadable artifacts skipped: 1" in report
     assert "| b1-al |" not in report
 
 
@@ -751,3 +762,40 @@ def test_never_run_arm_keeps_score_all_rc_zero(tmp_path, fixture_dir, capsys):
     assert _score_all(root, "NEVER") == 0
     captured = capsys.readouterr()
     assert "deleted stale score.json" not in captured.err
+
+
+def test_registry_missing_media_sha256_is_a_source_problem_not_a_traceback(
+    tmp_path, fixture_dir, capsys
+):
+    """Round-4 P2: an edited sources.json record without media_sha256 must
+    fail the source check (rc 3) with a diagnostic, never KeyError."""
+    root, _media = _setup(tmp_path, fixture_dir)
+    assert _prepare(root, "AREG1", "S01", 1) == 0
+    assert _run(root, "AREG1") == 0
+    src_file = root / "cases" / "sources.json"
+    data = json.loads(src_file.read_text(encoding="utf-8"))
+    data["sources"]["MS"].pop("media_sha256")
+    src_file.write_text(json.dumps(data), encoding="utf-8")
+    capsys.readouterr()
+    assert _score(root, "AREG1") == 3
+    captured = capsys.readouterr()
+    assert "no media_sha256" in captured.err
+    assert "Traceback" not in captured.err
+    assert _run(root, "AREG1") == 3
+
+
+def test_registry_missing_subtitle_specs_refuses_prepare_cleanly(
+    tmp_path, fixture_dir, capsys
+):
+    """Round-4 P2: a record without subtitle_specs must produce the prepare
+    refusal (rc 2) with a message, never KeyError."""
+    root, _media = _setup(tmp_path, fixture_dir)
+    src_file = root / "cases" / "sources.json"
+    data = json.loads(src_file.read_text(encoding="utf-8"))
+    data["sources"]["MS"].pop("subtitle_specs")
+    src_file.write_text(json.dumps(data), encoding="utf-8")
+    capsys.readouterr()
+    assert _prepare(root, "AREG2", "S01", 1) == 2
+    captured = capsys.readouterr()
+    assert "subtitle_specs" in captured.err
+    assert "Traceback" not in captured.err

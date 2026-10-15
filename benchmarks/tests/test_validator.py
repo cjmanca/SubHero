@@ -101,11 +101,18 @@ def test_mock_transcriber_never_auto_accepts(fixture_dir, tmp_path):
 
 
 class _FakeASR:
-    """Non-mock test transcriber with canned per-cue texts and confidence."""
+    """Non-mock test transcriber with canned per-cue texts, confidence, and
+    (F03) canned per-cue window-relative segment timestamps."""
 
-    def __init__(self, texts: dict[str, str], confidence: float = 1.0):
+    def __init__(
+        self,
+        texts: dict[str, str],
+        confidence: float = 1.0,
+        segments: dict[str, list[dict]] | None = None,
+    ):
         self.texts = dict(texts)
         self.confidence = confidence
+        self.segments = dict(segments) if segments else None
 
     def transcribe_window(self, wav_path, language, key=None):
         return Transcription(
@@ -114,6 +121,9 @@ class _FakeASR:
             seconds=0.0,
             model="fake",
             mock=False,
+            segments=(
+                self.segments[key] if self.segments and key in self.segments else None
+            ),
         )
 
 
@@ -159,11 +169,35 @@ def _stub_windows(monkeypatch):
     monkeypatch.setattr("bench.validator.extract_audio_window", lambda *a, **k: 0.1)
 
 
+def _hand_segments(cue_text: dict[str, str], text: str) -> dict[str, list[dict]]:
+    """F03 timing evidence localized to each cue's PROPOSED interval.
+
+    Matches `_hand_case` geometry: cue i spans original [1 s + i*10 s,
+    2 s + i*10 s] and the proposal restores it exactly; window starts at
+    max(0, start - PAD_US), so segment timestamps are window-relative.
+    """
+    segments: dict[str, list[dict]] = {}
+    for i, cid in enumerate(sorted(cue_text)):
+        start = 1_000_000 + i * 10_000_000
+        win_off = max(0, start - 1_500_000)
+        segments[cid] = [
+            {
+                "start_us": start - win_off,
+                "end_us": start - win_off + 1_000_000,
+                "text": text,
+            }
+        ]
+    return segments
+
+
 def test_same_language_lexical_accept_preserved(tmp_path, monkeypatch):
     _stub_windows(monkeypatch)
     cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: "the door is open" for cid in cue_text})
+    asr = _FakeASR(
+        {cid: "the door is open" for cid in cue_text},
+        segments=_hand_segments(cue_text, "the door is open"),
+    )
     acc = validate_proposal(
         case,
         proposal,
@@ -186,7 +220,10 @@ def test_same_language_lexical_reject_preserved(tmp_path, monkeypatch):
     _stub_windows(monkeypatch)
     cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: "lamps hum on the table" for cid in cue_text})
+    asr = _FakeASR(
+        {cid: "lamps hum on the table" for cid in cue_text},
+        segments=_hand_segments(cue_text, "lamps hum on the table"),
+    )
     acc = validate_proposal(
         case,
         proposal,
@@ -212,7 +249,11 @@ def test_same_language_lexical_accept_requires_reliable_transcript(
     _stub_windows(monkeypatch)
     cue_text = {"e0000": "the door is open", "e0001": "the door is open"}
     case, proposal, corrupted = _hand_case(cue_text)
-    asr = _FakeASR({cid: "the door is open" for cid in cue_text}, confidence=-1.0)
+    asr = _FakeASR(
+        {cid: "the door is open" for cid in cue_text},
+        confidence=-1.0,
+        segments=_hand_segments(cue_text, "the door is open"),
+    )
     acc = validate_proposal(
         case,
         proposal,
@@ -247,7 +288,11 @@ def test_cross_language_pairing_detection(tmp_path, monkeypatch):
     case, proposal, corrupted = _hand_case(cue_text)
     assert is_cross_language("I will protect this city.", "この街はわたしが守る")
     assert not is_cross_language("the door is open", "the door is wide open")
-    asr = _FakeASR({cid: "この街はわたしが守る" for cid in cue_text})
+    ja_line = "この街はわたしが守る"
+    asr = _FakeASR(
+        {cid: ja_line for cid in cue_text},
+        segments=_hand_segments(cue_text, ja_line),
+    )
     # Cross-language pairs are NOT lexically rejected; verifier decides.
     lexical = semantic_match(cue_text["e0000"], "この街はわたしが守る")
     assert lexical < 0.45  # old rule would have false-rejected
