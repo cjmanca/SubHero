@@ -53,11 +53,39 @@ never be promoted to timing proof: the sample abstains (measured outcome)
 and is counted, and abstained regions record
 ``semantic_content_present_in_window`` while accepted regions record
 ``timing_correspondence_verified``.
+
+Cross-language timing-ambiguity gate (M2, fourth review): the same-language path
+abstains when the matching dialogue appears both in the proposed interval and in
+the padding, and the cross-language path must carry the same burden. A verifier
+"match" over the PRECISE in-interval text is accepted only after a BOUNDED extra
+verification (capped by ``MAX_EXTRA_VERIFIER_CALLS``, counted in
+``verifier_calls``/``semantic_seconds``) probes each near-duplicate ORIGINAL-
+LANGUAGE occurrence found in the padding: a competitor the verifier ALSO matches
+makes the two occurrences indistinguishable and ABSTAINS
+(``cross_language_ambiguity``, mirroring ``multi_utterance_ambiguity`` and
+recording content-present); a competitor the verifier does NOT match leaves the
+in-interval match unambiguous (accept); a probe with no usable verdict, or more
+competitors than the cap allows, fails closed (``cross_language_ambiguity_budget``,
+an unprobed occurrence — not a matched-both claim). Competitors are detected PER
+SEGMENT: each precise in-interval utterance is compared against every padding
+segment, the joined padding group, and every broad boundary-crossing segment, so
+a repeated line is never diluted by being joined against unrelated in-interval
+speech. Near-duplicate detection compares transcript<->transcript text after
+``_dup_normalize`` (NFKC + whitespace/punctuation/symbol stripping + casefold) at
+the INCLUSIVE ``PAD_NEAR_DUPLICATE_RATIO`` floor, with a verbatim-substring
+containment rule for a short line embedded in a longer segment — cross-language
+transcript<->subtitle lexical scores remain non-evidence, so a valid translation
+is never rejected for words differing from the transcript. A single ASR segment
+that crosses the interval boundary into the padding mixes in-interval with
+past-interval speech and is NOT precise time-local evidence for one utterance: a
+match supported only by such a broad segment abstains (``broad_segment_matches``)
+instead of auto-accepting.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -75,6 +103,33 @@ SCRIPT_MAJORITY = 0.5
 # widened by this slack. It is NOT the 1.5 s window padding (padding presence
 # is content evidence only, never timing proof).
 TIMING_TOLERANCE_US = 500_000
+# M2 (fourth review): near-duplicate threshold for the cross-language timing
+# ambiguity gate. A padding/broad ASR candidate is a "near-duplicate" of an
+# in-interval utterance when, after ``_dup_normalize`` (NFKC + strip
+# whitespace/punctuation/symbols + casefold, so spacing and full/half-width and
+# punctuation noise are neutralized), the lexical ``semantic_match`` of the two
+# ORIGINAL-LANGUAGE (ASR transcript) texts reaches this ratio — the same-language
+# transcript<->transcript comparison is meaningful (both are source-language
+# text), unlike a cross-language transcript<->subtitle lexical score, which
+# stays non-evidence. The floor is INCLUSIVE (``>= 0.80`` qualifies). A short
+# utterance repeated VERBATIM inside a longer (e.g. broad) segment also counts
+# via the documented substring-containment rule, because a substring of a longer
+# span falls below the floor yet is the SAME line. A 0.80 token/character-bigram
+# Dice floor flags repeated or near-identical lines (the ambiguity trigger)
+# while ignoring unrelated padding dialogue; it never lowers F03's accept/reject
+# gates.
+PAD_NEAR_DUPLICATE_RATIO = 0.80
+# M2: minimum normalized length for the verbatim-substring near-duplicate rule.
+# 2 characters is the shortest common CJK word unit (a repeat that short is a
+# genuine ambiguous anchor); a short Latin fragment over-triggering is accepted
+# as a bounded extra-probe cost (it only requests verification, never accepts).
+NEAR_DUPLICATE_SUBSTRING_MIN_CHARS = 2
+# M2: hard cap on the bounded ADDITIONAL semantic-verifier calls made per sample
+# to disambiguate a competing near-duplicate padding occurrence. Extra probes
+# are counted in verifier_calls/semantic_seconds exactly like run_verifier. If a
+# sample has more competitors than this cap allows, it fails closed (abstains)
+# rather than auto-accepting an unprobed position.
+MAX_EXTRA_VERIFIER_CALLS = 2
 # Script classes used for dominant-script detection. Lexical comparison is
 # meaningful evidence only when both sides share the same language; a majority-
 # script contrast is a *signal* that lexical comparison is meaningless, never
@@ -299,6 +354,54 @@ def semantic_match(subtitle_text: str, transcript_text: str) -> float:
     return max(word_score, char_score)
 
 
+def _dup_normalize(text: str) -> str:
+    """Deterministic near-duplicate comparison form for transcript<->transcript text.
+
+    NFKC-normalizes (folding full-width/half-width forms and compatibility
+    variants), then keeps only letters, combining marks and numbers
+    (``unicodedata.category`` first letter ``L``/``M``/``N``), dropping
+    whitespace and every punctuation/symbol/control character, then case-folds.
+    This neutralizes surface noise that must NOT hide a repeated line: Japanese
+    punctuation (``、`` ``！``), spacing, and full/half-width forms all collapse.
+    It deliberately folds NO words and translates nothing — 私 vs わたし (kanji
+    vs hiragana of the same word) stay distinct, so this is a conservative
+    surface-normalizer for detecting the SAME verbatim/near-verbatim line, not a
+    semantic-identity test.
+    """
+    nfkc = unicodedata.normalize("NFKC", text)
+    return "".join(
+        ch for ch in nfkc if unicodedata.category(ch)[0] in ("L", "M", "N")
+    ).casefold()
+
+
+def _near_duplicate(a: str, b: str) -> bool:
+    """True when two ORIGINAL-LANGUAGE (ASR transcript) texts are near-duplicates.
+
+    M2 cross-language ambiguity gate: this compares transcript<->transcript,
+    i.e. both sides are source-language text, so the lexical Dice coefficient
+    (``semantic_match``) is a meaningful near-duplicate measure — repeated or
+    near-identical lines score high, unrelated padding dialogue scores low.
+    Cross-language transcript<->SUBTITLE lexical scores are deliberately NOT
+    used here (they are never evidence across languages); the semantic verifier
+    decides semantic correspondence, this helper only flags which padding
+    occurrences need that bounded extra verification.
+
+    Both texts go through ``_dup_normalize`` first (whitespace/punctuation/
+    full-half-width noise neutralized). A pair qualifies when the Dice reaches the
+    INCLUSIVE floor ``PAD_NEAR_DUPLICATE_RATIO``, OR when the SHORTER normalized
+    text is a VERBATIM substring of the longer one (>= 2 chars): a repeated line
+    embedded in a longer/broader segment is the SAME utterance even though its
+    substring Dice falls below the floor. Deterministic, no model, no translation.
+    """
+    na, nb = _dup_normalize(a), _dup_normalize(b)
+    if not na or not nb:
+        return False
+    if semantic_match(na, nb) >= PAD_NEAR_DUPLICATE_RATIO:
+        return True
+    short, long = (na, nb) if len(na) <= len(nb) else (nb, na)
+    return len(short) >= NEAR_DUPLICATE_SUBSTRING_MIN_CHARS and short in long
+
+
 def cue_region(cue_start_us: int, regions: list[dict]) -> int | None:
     for i, r in enumerate(regions):
         end = r.get("end_us")
@@ -348,14 +451,38 @@ def _segment_timing(
     cover a cue spanning two consecutive in-segments; a join never mixes an
     in-segment with a padding segment, so padding text can never lend
     time-local support.
+
+    M2 (fourth review) split within the overlap set: a segment is PRECISE
+    time-local only when its whole span stays inside the tolerant interval
+    (``media_start >= start_us - tol_us and media_end <= end_us + tol_us``).
+    A segment that intersects the tolerant interval but runs PAST it on either
+    side (into the padding) is a BROAD segment: its text mixes in-interval
+    speech with past-interval speech and is NOT precise evidence for one
+    specific utterance. ``precise_*``/``broad_*`` are reported alongside the
+    existing ``overlap``/``padding`` fields so the same-language ratio logic
+    (which joins the whole overlap set) stays unchanged.
+
+    ``precise_texts``/``padding_texts``/``broad_texts`` expose the PER-SEGMENT
+    texts (plus the joined ``precise_overlap_text``) so ``probe_padding_ambiguity``
+    can compare EACH precise in-interval utterance against EACH padding segment,
+    the joined padding group, and each broad segment — a near-duplicate is never
+    diluted by being joined against unrelated in-interval speech. Text
+    normalization for that comparison is ``_dup_normalize`` (whitespace/
+    punctuation/full-half-width neutralized).
     """
     overlap: list[dict] = []
     padding: list[dict] = []
+    precise: list[dict] = []
+    broad: list[dict] = []
     for seg in segments:
         media_start = win_off_us + seg["start_us"]
         media_end = win_off_us + seg["end_us"]
         if media_start < end_us + tol_us and media_end > start_us - tol_us:
             overlap.append(seg)
+            if media_start >= start_us - tol_us and media_end <= end_us + tol_us:
+                precise.append(seg)
+            else:
+                broad.append(seg)
         else:
             padding.append(seg)
 
@@ -378,6 +505,11 @@ def _segment_timing(
         "padding_ratio": best(pad_cands) if pad_cands else 0.0,
         "n_overlap": len(overlap),
         "overlap_text": " ".join(s["text"] for s in overlap),
+        "n_precise_overlap": len(precise),
+        "precise_overlap_text": " ".join(s["text"] for s in precise),
+        "precise_texts": [s["text"] for s in precise],
+        "broad_texts": [s["text"] for s in broad],
+        "padding_texts": [s["text"] for s in padding],
     }
 
 
@@ -465,6 +597,21 @@ def validate_proposal(
     ``timing_correspondence_verified``. This stays a B1-targeted experiment;
     no forced-alignment pipeline is introduced.
 
+    M2 (fourth review) closes the cross-language half of that gate: a verifier
+    "match" over the PRECISE in-interval text auto-accepts only when a bounded
+    extra verification rules out a near-duplicate ORIGINAL-LANGUAGE occurrence
+    in the padding. Competitors are detected PER SEGMENT (each precise
+    in-interval utterance vs every padding segment, the joined padding group,
+    and every broad boundary-crossing segment), with ``_dup_normalize``
+    neutralizing spacing/punctuation/full-half-width noise at the inclusive
+    ``PAD_NEAR_DUPLICATE_RATIO`` floor plus a verbatim-substring rule. An
+    indistinguishable competitor, a probe with no usable verdict, a competitor
+    count over the cap, or a broad boundary-crossing segment as the sole
+    time-local source all abstain, never accept, so cross-language acceptance
+    requires unambiguous evidence that the matching utterance occurred at the
+    proposed time. Genuinely unique in-interval matches keep the single-call
+    accept.
+
     ``language`` is the resolved spoken/audio language hint and
     ``subtitle_language`` the resolved target-subtitle hint (defaults to "und"
     so existing call sites keep working). Routing keys on the verified identity
@@ -526,6 +673,14 @@ def validate_proposal(
     padding_only_matches = 0
     multi_utterance_ambiguity = 0
     timing_unverified_match = 0
+    # M2 (fourth review): cross-language timing-ambiguity gates.
+    cross_language_ambiguity = 0  # matching dialogue in-interval AND near-duplicate in padding (verifier matched both)
+    cross_language_ambiguity_budget = (
+        0  # competing occurrences exceed the extra-verification cap -> fail-closed
+    )
+    broad_segment_matches = (
+        0  # sole time-local source is a broad segment crossing the boundary
+    )
     region_content_present: dict[int, bool] = {}
     mock_verifier_used = False
     audio_identity = normalize_language(language)
@@ -536,39 +691,48 @@ def validate_proposal(
         and audio_identity == subtitle_identity
     )
 
+    def _query_verifier(subtitle_text: str, transcript_text: str):
+        """One raw verifier round-trip; counts calls/seconds (F07 separation)."""
+        nonlocal semantic_seconds, verifier_calls
+        verifier_calls += 1
+        sv = verifier.verdict(
+            subtitle_text, transcript_text, subtitle_language, language
+        )
+        semantic_seconds += sv.seconds
+        return sv
+
     def run_verifier(
         region: int,
         subtitle_text: str,
         transcript_text: str,
         reliable: bool | None,
         timing_verified: bool,
-    ) -> None:
-        """Send one sample to the semantic verifier boundary and record its verdict.
+        broad: bool = False,
+    ) -> str:
+        """Send one sample to the semantic verifier boundary and RETURN its verdict.
 
         The verifier is translation-tolerant and receives the RESOLVED language
-        hints (never a hardcoded "und"). match + usable transcript reliability
-        (F07 gate) + time-local evidence (F03: the judged transcript text
-        covers the proposed interval, not the whole padded window) -> accept;
-        a match without time-local evidence is
-        ``semantic_content_present_in_window`` and abstains, never accepts
-        (recorded as its own abstention counter); no_match -> reject (verifier
-        evidence, not an acceptance path); unknown/exception -> abstain (no
-        usable verdict)."""
-        nonlocal semantic_seconds, verifier_no_verdict, low_confidence_abstentions
-        nonlocal mock_verifier_used, timing_unverified_match, verifier_calls
-        verifier_calls += 1
+        hints (never a hardcoded "und"). The caller appends the returned verdict
+        to ``verdicts``. match + usable transcript reliability (F07 gate) +
+        PRECISE time-local evidence (F03: the judged transcript text lies inside
+        the proposed interval, not the whole padded window) -> "accept"; a match
+        whose only evidence is the padded window is ``semantic_content_present_in_window``
+        and abstains as ``timing_unverified_match``; a match supported ONLY by a
+        broad ASR segment that crosses the proposed-interval boundary (M2: it
+        mixes in-interval speech with past-interval speech, so it localizes no
+        single utterance) abstains as ``broad_segment_matches``, never accepts.
+        no_match -> "reject" (verifier evidence, not an acceptance path);
+        unknown/exception -> abstain (no usable verdict)."""
+        nonlocal verifier_no_verdict, low_confidence_abstentions
+        nonlocal mock_verifier_used, timing_unverified_match, broad_segment_matches
         try:
-            sv = verifier.verdict(
-                subtitle_text, transcript_text, subtitle_language, language
-            )
-            semantic_seconds += sv.seconds
+            sv = _query_verifier(subtitle_text, transcript_text)
         except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
-            verdicts.setdefault(region, []).append("abstain")
             verifier_no_verdict += 1
             (scratch_dir / "asr_errors.log").open("a", encoding="utf-8").write(
                 f"{cid}: semantic verifier: {exc}\n"
             )
-            return
+            return "abstain"
         if sv.mock:
             mock_verifier_used = True
             (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
@@ -576,28 +740,177 @@ def validate_proposal(
             )
         if sv.verdict == "match":
             if reliable is not True:
-                verdicts.setdefault(region, []).append("abstain")
                 low_confidence_abstentions += 1
                 (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
                     f"{cid}: verifier match not accepted: ASR reliability signal "
                     "missing/unusable; abstained\n"
                 )
-            elif not timing_verified:
-                verdicts.setdefault(region, []).append("abstain")
-                timing_unverified_match += 1
+                return "abstain"
+            if not timing_verified:
+                region_content_present[region] = True
+                if broad:
+                    broad_segment_matches += 1
+                    (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                        f"{cid}: a broad ASR segment crosses the proposed interval "
+                        "boundary and mixes in-interval with past-interval speech; "
+                        "it does not localize the matched utterance "
+                        "(semantic_content_present_in_window, timing correspondence "
+                        "unverified); abstained\n"
+                    )
+                else:
+                    timing_unverified_match += 1
+                    (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                        f"{cid}: verifier match over the padded window only: "
+                        "semantic_content_present_in_window, timing correspondence "
+                        "unverified; abstained\n"
+                    )
+                return "abstain"
+            return "accept"
+        elif sv.verdict == "no_match":
+            return "reject"
+        verifier_no_verdict += 1
+        return "abstain"
+
+    def probe_padding_ambiguity(region: int, subtitle_text: str, timing: dict) -> str:
+        """Bounded extra verification of competing near-duplicate occurrences (M2).
+
+        An in-interval verifier "match" fixes the proposed timing only when NO
+        original-language near-duplicate of that utterance also occurs in the
+        padding. Competitors are matched PER SEGMENT, not only against the joined
+        in-interval text: each PRECISE in-interval segment (and the joined precise
+        text) is a probe target, and each PADDING candidate — every individual
+        padding segment, the full joined padding group (the split-repeat geometry,
+        mirroring ``_segment_timing``'s ``pad_cands`` join), and every broad
+        boundary-crossing segment — qualifies when it near-duplicates ANY precise
+        in-interval utterance. Each qualifying competitor is probed with the
+        semantic verifier (capped by ``MAX_EXTRA_VERIFIER_CALLS``, counted in
+        verifier_calls/semantic_seconds like every other verifier call): a
+        competitor the verifier ALSO matches means the in-interval and padding
+        occurrences are indistinguishable -> ABSTAIN (``cross_language_ambiguity``,
+        mirroring the same-language ``multi_utterance_ambiguity`` gate, recording
+        content-present); a competitor the verifier does NOT match leaves the
+        in-interval match unambiguous; a probe with no usable verdict fails closed
+        (abstain); and when there are more competitors than the cap allows, the
+        sample fails closed as ``cross_language_ambiguity_budget`` (an
+         UNPROBED competing occurrence, not a matched-both result). Every
+         abstention here records ``semantic_content_present_in_window`` (the
+         in-interval verifier "match" already proved the content is present; only
+         its position is ambiguous), matching the ``timing_unverified_match`` and
+         same-language ambiguity convention. With no near-duplicate competitor it
+         returns "accept" at zero extra cost. Returns the final verdict to record
+         ("accept" or "abstain")."""
+        nonlocal cross_language_ambiguity, cross_language_ambiguity_budget
+        nonlocal verifier_no_verdict, mock_verifier_used
+        in_candidates: list[str] = []
+        for t in list(timing["precise_texts"]) + [timing["precise_overlap_text"]]:
+            if t and t not in in_candidates:
+                in_candidates.append(t)
+        pad_texts = timing["padding_texts"]
+        pad_candidates: list[str] = list(pad_texts)
+        if len(pad_texts) > 1:
+            pad_candidates.append(" ".join(pad_texts))
+        pad_candidates += list(timing["broad_texts"])
+        competitors: list[str] = []
+        for cand in pad_candidates:
+            if not cand or cand in competitors:
+                continue
+            if any(_near_duplicate(in_t, cand) for in_t in in_candidates):
+                competitors.append(cand)
+        if not competitors:
+            return "accept"
+        used = 0
+        for comp in competitors:
+            if used >= MAX_EXTRA_VERIFIER_CALLS:
+                cross_language_ambiguity_budget += 1
                 region_content_present[region] = True
                 (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
-                    f"{cid}: verifier match over the padded window only: "
-                    "semantic_content_present_in_window, timing correspondence "
-                    "unverified; abstained\n"
+                    f"{cid}: competing near-duplicate occurrence(s) in the window "
+                    "padding exceed the bounded extra-verification budget; the "
+                    "position was NOT disambiguated; fail-closed abstain (no "
+                    "verifier matched-both claim)\n"
                 )
-            else:
-                verdicts.setdefault(region, []).append("accept")
-        elif sv.verdict == "no_match":
-            verdicts.setdefault(region, []).append("reject")
-        else:
-            verdicts.setdefault(region, []).append("abstain")
+                return "abstain"
+            used += 1
+            try:
+                sv = _query_verifier(subtitle_text, comp)
+            except Exception as exc:  # noqa: BLE001 -- verifier boundary failures abstain
+                verifier_no_verdict += 1
+                region_content_present[region] = True
+                (scratch_dir / "asr_errors.log").open("a", encoding="utf-8").write(
+                    f"{cid}: cross-language padding-ambiguity probe: {exc}\n"
+                )
+                return "abstain"
+            if sv.mock:
+                mock_verifier_used = True
+                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                    f"{cid}: mock semantic verifier used; test-only\n"
+                )
+            if sv.verdict == "match":
+                cross_language_ambiguity += 1
+                region_content_present[region] = True
+                (scratch_dir / "asr_notes.log").open("a", encoding="utf-8").write(
+                    f"{cid}: the matching dialogue occurs in the proposed interval "
+                    "AND as a near-duplicate in the window padding, and the "
+                    "semantic verifier matched both occurrences; utterance "
+                    "position ambiguous; abstained\n"
+                )
+                return "abstain"
+            if sv.verdict == "no_match":
+                continue
             verifier_no_verdict += 1
+            region_content_present[region] = True
+            return "abstain"
+        return "accept"
+
+    def cross_lang_route(
+        region: int,
+        subtitle_text: str,
+        timing: dict | None,
+        result,
+        reliable: bool | None,
+    ) -> None:
+        """Verifier-decided acceptance path carrying the M2 timing-ambiguity gates.
+
+        Shared by the cross-language branch and the unverified-identity verifier
+        fallback so a verifier accept always has the same evidence burden: the
+        verifier judges the PRECISE in-interval segments, a match is accepted
+        only after the bounded padding near-duplicate probe rules out competing
+        occurrences, a match supported only by a broad boundary-crossing segment
+        abstains, and a padded-window match with no in-interval utterance
+        abstains."""
+        nonlocal no_verifier_cross_lang
+        if verifier is None:
+            verdicts.setdefault(region, []).append("abstain")
+            no_verifier_cross_lang += 1
+            return
+        if timing is not None and timing["n_precise_overlap"] > 0:
+            verdict = run_verifier(
+                region,
+                subtitle_text,
+                timing["precise_overlap_text"],
+                reliable,
+                timing_verified=True,
+            )
+            if verdict == "accept":
+                verdict = probe_padding_ambiguity(region, subtitle_text, timing)
+            verdicts.setdefault(region, []).append(verdict)
+        elif timing is not None and timing["n_overlap"] > 0:
+            verdicts.setdefault(region, []).append(
+                run_verifier(
+                    region,
+                    subtitle_text,
+                    result.text,
+                    reliable,
+                    timing_verified=False,
+                    broad=True,
+                )
+            )
+        else:
+            verdicts.setdefault(region, []).append(
+                run_verifier(
+                    region, subtitle_text, result.text, reliable, timing_verified=False
+                )
+            )
 
     for cid in samples:
         start_us, end_us = proposal.proposed_times_us[cid]
@@ -640,32 +953,15 @@ def validate_proposal(
         elif is_cross_language(subtitle_text, result.text, language, subtitle_language):
             # Lexical score is never accept-support and never reject evidence
             # across languages; only the semantic verifier boundary decides.
-            # F03: the verifier judges the segments that overlap the proposed
-            # interval (time-local candidates). With no in-interval utterance
-            # at all, a padded-window match proves only
-            # semantic_content_present_in_window and abstains in run_verifier.
-            # The F07 reliability gate applies to the verifier's ACCEPT verdict
-            # inside run_verifier; no_match stays a verifier-evidence reject.
-            if verifier is None:
-                verdicts.setdefault(region, []).append("abstain")
-                no_verifier_cross_lang += 1
-                continue
-            if timing is not None and timing["n_overlap"] > 0:
-                run_verifier(
-                    region,
-                    subtitle_text,
-                    timing["overlap_text"],
-                    reliable,
-                    timing_verified=True,
-                )
-            else:
-                run_verifier(
-                    region,
-                    subtitle_text,
-                    result.text,
-                    reliable,
-                    timing_verified=False,
-                )
+            # F03/M2: the verifier judges the PRECISE in-interval segments; a
+            # verifier match auto-accepts only after the bounded padding
+            # near-duplicate probe rules out a competing occurrence, a match
+            # supported only by a broad boundary-crossing segment abstains, and
+            # a padded-window match with no in-interval utterance abstains.
+            # cross_lang_route applies every gate; no_match stays a
+            # verifier-evidence reject, the F07 reliability gate applies to the
+            # ACCEPT verdict, and the no-verifier abstention is preserved.
+            cross_lang_route(region, subtitle_text, timing, result, reliable)
         elif reliable is not True:
             # Shared quality gate (F07): a lexical-path accept requires a usable
             # ASR reliability signal; a missing sentinel / low / uninterpretable
@@ -727,25 +1023,13 @@ def validate_proposal(
             verdicts.setdefault(region, []).append("reject")
         elif verifier is not None:
             # Identity not verified: low overlap is NOT sufficient negative
-            # evidence. Route to the verifier when configured, judging the
-            # in-interval candidates when available (never reject on an
-            # unverified identity without verifier evidence).
-            if timing["n_overlap"] > 0:
-                run_verifier(
-                    region,
-                    subtitle_text,
-                    timing["overlap_text"],
-                    reliable,
-                    timing_verified=True,
-                )
-            else:
-                run_verifier(
-                    region,
-                    subtitle_text,
-                    result.text,
-                    reliable,
-                    timing_verified=False,
-                )
+            # evidence. Route to the verifier when configured (never reject on an
+            # unverified identity without verifier evidence). cross_lang_route
+            # applies the same M2 gates: a verifier accept requires precise
+            # in-interval evidence AND a padding near-duplicate probe that
+            # rules out a competing occurrence; broad-segment and padded-window
+            # matches abstain.
+            cross_lang_route(region, subtitle_text, timing, result, reliable)
         else:
             verdicts.setdefault(region, []).append("abstain")
             identity_unknown_abstentions += 1
@@ -856,6 +1140,30 @@ def validate_proposal(
             "verifier matched the padded window without time-local segment "
             "evidence; abstained (never accepted)"
         )
+    if cross_language_ambiguity:
+        notes_parts.append(
+            f"{cross_language_ambiguity} cross-language samples: the matching "
+            "dialogue occurs at the proposed interval AND as a near-duplicate in "
+            "the window padding, and the semantic verifier matched both "
+            "occurrences (repeated dialogue; utterance position ambiguous); "
+            "abstained (never auto-accepted)"
+        )
+    if cross_language_ambiguity_budget:
+        notes_parts.append(
+            f"{cross_language_ambiguity_budget} cross-language samples: competing "
+            "near-duplicate padding occurrence(s) exceeded the bounded "
+            "extra-verification budget; the position was NOT disambiguated by any "
+            "verifier verdict (fail-closed, no verifier matched-both claim); "
+            "abstained (never auto-accepted)"
+        )
+    if broad_segment_matches:
+        notes_parts.append(
+            f"{broad_segment_matches} cross-language samples: the verifier match "
+            "rested on a broad ASR segment crossing the proposed-interval "
+            "boundary (in-interval speech mixed with past-interval speech; it "
+            "localizes no single utterance — synthetic broad segments are not "
+            "forced-alignment evidence); abstained (never accepted)"
+        )
     if mock_verifier_used:
         notes_parts.append("mock semantic verifier used (test-only)")
     no_evidence = (
@@ -864,6 +1172,9 @@ def validate_proposal(
         + identity_unknown_abstentions
         + timing_evidence_unavailable
         + timing_unverified_match
+        + cross_language_ambiguity
+        + cross_language_ambiguity_budget
+        + broad_segment_matches
     ) > 0
     if (
         not accepted_regions
