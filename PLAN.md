@@ -1,107 +1,99 @@
-# SubHero — second code review and Qwen remediation handoff
+# SubHero — Third review and bounded Qwen remediation handoff
 
-**Review target:** `cjmanca/SubHero`, branch `main`, commit `bdb937fc4a0d846920a2072724975cb88feecc49` (2026-10-14).  
-**Comparison baseline:** `06f8ae660f4dbe397214fef3baa3257460ff9d6a`.  
-**Review type:** Source-level review of the changes and benchmark contracts. Not a full execution of the repository test suite. I separately reproduced the FFmpeg audio-map failure using a one-stream WAV, and checked the committed S03 case's breakpoint timestamps arithmetically. The project's `STATUS.md` records **151 passing tests** and clean Ruff checks; these are project-reported, not independently rerun here.
+**Repository:** https://github.com/cjmanca/SubHero  
+**Reviewed branch/HEAD:** `main` / `d4da5d6698497c5f1ecedfa60b1f9f068777b43e` (2026-10-14)  
+**Comparison baseline:** `bdb937fc4a0d846920a2072724975cb88feecc49`  
+**Review method:** Read-only GitHub source review of the 13 intervening commits, relevant benchmark modules, tests, and project ledger. The reviewer could not clone the repository in the execution environment and **did not run its actual test suite, FFmpeg benchmark matrix, or a live inference endpoint**. The project's ledger reports 222 passing tests and clean Ruff checks; that is project-reported evidence, not an independently executed check. A minimal reproduction of the isolated-cue discontinuity-counting issue was run independently against the code's documented formula.
 
-## Overall disposition
+## Disposition
 
-**Changes substantially address the first audit, but G0/G1 real-media readiness is not yet established.** In particular, the existing source-selection tests prove that the selected audio was decoded, but miss that the targeted validator tries to select the same multi-audio stream *again* from the already single-stream WAV. There are also benchmark scoring, language-routing, reproducibility, and privacy edge cases that can lead to misleading results or accidentally tracked private data.
+The previous remediation has substantially addressed its requested fixes: private media have a Git-ignored home, audio streams are explicitly selected, cross-language comparisons are routed to semantic verification, candidate output mapping is more conservative, and the prior gap-at-breakpoint scoring bug has been addressed. **Do not begin evidence-based G1 algorithm selection yet.** Four remaining benchmark-validity defects can distort the results, followed by three narrower reporting/evidence problems. This is a **corrective assignment only**, not authorization to develop B2–B5 or the production application.
 
-Fix the blocking items **before** using E01/E02 for benchmark conclusions. Do not implement B2–B5 or the production application as part of this handoff. Continue preserving `PLAN.md` immutability and leave G0/G1 explicitly unverified until real-media runs.
+Follow `AGENTS.md` and `ORCHESTRATION.md`. Use this as a new, separately approved bounded plan; **do not silently edit the previous frozen `PLAN.md`** or mark work accepted before checks run. Only the main orchestrator owns plan/version approval and `STATUS.md`. Preserve private media and synthetic fixture evidence.
 
-## Blocking findings (P1)
+## Blocking findings
 
-### F01 — Selected second audio stream breaks targeted ASR
+### F01 — P1: A B1-VA acceptance is not invalidated when its base proposal changes
 
-**Location:** [`benchmarks/bench/cli.py` lines 545–601 and 641–719](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/cli.py#L545-L601); [`benchmarks/bench/validator.py` lines 237–244](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/validator.py#L237-L244).
+**Source:** `benchmarks/bench/cli.py` `_acceptance_binding_problem()` (~446–530), `cmd_run()` (~1020–1105), `cmd_score()` (~1108–1215); `benchmarks/bench/fingerprint.py` (~26–73).
 
-`_get_reference_audio()` extracts the selected `0:a:<sidx>` into `reference.wav` (which has **only audio stream 0**), then `cmd_run()` passes that same stream selection along with `reference.wav` to `validate_proposal()`. The validator calls `extract_audio_window(reference.wav, ..., audio_stream="0:a:1")` when the registered original stream is `sidx:1`, and FFmpeg fails because the WAV has no second audio stream. ASR window failures are caught and turned into abstentions, so the benchmark may misleadingly report uncertain validation instead of explaining that the input-map plumbing is broken. A local one-stream-WAV check confirmed `-map 0:a:1` fails with “Stream map matches no streams.”
+`b1-va/run.json` records `validated_candidate_id` and `base_proposal_sha256`, but `_acceptance_binding_problem()` checks only its own acceptance hash and the *name* of the validated base arm. It does **not** verify the current base-arm proposal's checksum, base run generation/fingerprint, or the verifier/ASR configuration that produced the acceptance. The B1-VA `input_fingerprint` is calculated with `tool_versions={}` and has no dependency on base proposal bytes, CLI sample seed, language hints, model identity, verifier choice, or prompt/settings. As a result:
 
-**Fix:** Adopt one clear contract: either (preferred) extract ASR windows from the **already selected** `reference.wav` using `0:a:0`/no map, or extract directly from the original container using the persisted selected stream. Do not mix these paths. Preserve source-audio identity in preprocessing/run metadata.
+1. Run a base candidate and B1-VA on a case.
+2. Rerun that base candidate with different candidate settings or results, keeping the case unchanged.
+3. Score `b1-va` without rerunning the validator. The old acceptance can still pass the own-run hash and identity checks and be scored as if it validated the new proposal.
 
-**Acceptance:** Integration test using a two-audio-stream MKV, with nonfirst (`sidx:1`) selected, invokes a *real FFmpeg extraction* on the exact validator input; confirms the expected selected audio and successful window extraction. Update the existing test that currently only asserts a mocked function received `audio_stream="0:a:1"` — that test was affirming the bug.
+Similarly, changing `--base-candidate`, `--seed`, `--language`, `--subtitle-language`, or local ASR/semantic models can leave a current-looking yet obsolete acceptance artifact. This defeats the purpose of the previous stale-result remediation.
 
-### F02 — A perfectly repaired breakpoint can be scored as missed and false-positive
+**Required fix:** Make the accepted-result identity depend on the exact validated base **run and proposal**, including hashes, and on the validation input configuration (sampling seed, resolved language identities, ASR/verifier model IDs/revisions/settings; no credentials). At `score` and `report`, reject or clearly exclude an acceptance that no longer matches the current base. Don't compare only the base candidate *name*. On a base rerun, either proactively invalidate downstream artifacts or enforce the dependency check at read time.
 
-**Location:** [`benchmarks/bench/scoring.py` lines 180–209](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/scoring.py#L180-L209); committed [`benchmarks/cases/Fx00-S03.case.json`](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/cases/Fx00-S03.case.json).
+**Focused regressions:** base result A → validate → base result B (same case) → B1-VA `score` refuses; unchanged base continues to score; different validation seed/model/language cannot be mislabeled as the same experiment. A deletion of stale `score.json` must not remove legitimate current results.
 
-The scoring rule places each detected correction step at the **next cue's original start**, then requires it to be within `--tol-break-us` (default 0.5 seconds) of the exact injected breakpoint. However, an injected breakpoint may be in a silent or subtitle-free gap. The committed S03 case has a true breakpoint at **45.12 s**, while its first post-breakpoint cue (`e0019`) begins at **48.00 s**, a **2.88 s** gap. Even an *exactly correct* repair that changes offsets at that cue is reported as an unmatched breakpoint and a false positive under the default tolerance. The existing hand-built perfect-repair tests put breakpoints *exactly* on cue onsets, so they do not cover this.
+### F02 — P1: The input fingerprint omits ground truth and oracle input material
 
-**Fix:** Score a breakpoint's identifiable **bracketing interval** between adjacent cue anchors, separately from any precise time-localization estimate. Credit a correct correction discontinuity when the known breakpoint is inside the uniquely matched interval; report localization uncertainty rather than inventing precision in speech-free spans. Enforce one-to-one matching so one proposed jump cannot receive multiple true-breakpoint credits. Retain a separate metric for unresolved residual discontinuities.
+**Source:** `benchmarks/bench/fingerprint.py` `fingerprint_payload()` (~26–59); `benchmarks/bench/cli.py` `cmd_score()` (~1108–1215).
 
-**Acceptance:** Add a test with a *perfect inverse repair of the committed* `Fx00-S03` case; detection must not be labeled false/missed solely because the injected boundary falls in a 2.88-second gap. Preserve no-op zero-detection credit and explicit additional-jump false positives. Exercise multiple jumps and sparse dialogue.
+The declared fingerprint contract says it binds the injected ground truth to a case generation, but its `case` payload omits `original_times_us`, `injected_cue_deltas`, `expected_inverse`, `transform`, and `grid_us`/format; it also omits oracle gold-classification **content** and subtitle-source identity. These inputs can change the score or oracle anchor selection without changing the fingerprint. For example, edit an original onset in a private `.case.json` but leave the seed/params/subtitle SHA unchanged: the same `input_fingerprint` still matches, while the apparent timing-error result changes. Likewise, changing gold cue labels can change a `b1-pxo-*` candidate's behavior without invalidating its cached proposal.
 
-### F03 — Cross-language routing still rejects Korean/Russian and different Latin-script languages
+**Required fix:** Version the fingerprint contract and bind the **canonical semantic case inputs**, actual ground-truth annotation revision/hash, selected subtitle input identity, and any oracle-only labels by content hash. Don't include mutable output locations or secrets. Ensure the binding is checked consistently in `run`, `score`, B1-VA dependencies, and `report`. Historical score rows with old fingerprints must not be silently mixed into new comparisons.
 
-**Location:** [`benchmarks/bench/validator.py` lines 31–95 and 262–297](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/validator.py#L31-L95).
+**Focused regressions:** modify a private case's gold timing or injected deltas while keeping its corrupted subtitle bytes unchanged → stale scores rejected; modify the oracle cue classification file → its dependent arm must rerun; a genuine unchanged case remains cacheable.
 
-The fix recognizes CJK ideographs/kana versus Latin and treats `ja`/`zh` source-language hints as a reason to use the multilingual verifier. It does **not** recognize Hangul or Cyrillic, or distinguish languages that share Latin script. Example: a Korean transcript `안녕하세요` against the English subtitle `Hello` has neither a Latin-majority nor a recognized `ja/zh` language rule; `is_cross_language(..., "ko")` returns false. With usable ASR confidence and little lexical overlap, the code **rejects** the timing proposal rather than invoking the configured semantic verifier/abstaining. Russian→English, French→English, and romanized source languages can fail similarly.
+### F03 — P1: Targeted semantic verification does not prove *where* matching speech occurs
 
-**Fix:** Route by **verified source and target language identity**, not primarily by script. Record/resolve the target subtitle language separately from the audio language; use the multilingual verifier when they differ. If language identity is unknown or the text is mixed, low lexical overlap is **not sufficient negative evidence**; verify semantically or abstain. Script detection can be a fallback signal, never the sole cross-language gate. Provide real language hints to the verifier instead of hardcoding subtitle language `"und"`.
+**Source:** `benchmarks/bench/validator.py` `PAD_US` (~51), `validate_proposal()` (~332–570), especially audio extraction (~471–477), and verifier verdict acceptance (~418–464).
 
-**Acceptance:** Tests for Korean→English, Russian→English, French→English (both Latin), Japanese/Mandarin→English, romanized source-language outputs, and genuinely same-language cases; missing verifier must not turn correct translated subtitles into `no_match` rejects. Do not equate an LLM model-reported confidence with calibrated correctness.
+The validator extracts the **entire proposed cue interval plus 1.5 s on each side**, transcribes the whole window into one text string, then asks whether the subtitle matches that transcript. There is no word/utterance timestamp, speaker/segment association, or evidence that the matching words occurred **inside the proposed subtitle interval** rather than in the padding. With close adjacent lines or repeated dialogue, a wrongly shifted cue can therefore be accepted because its actual line is *nearby*, even if not spoken when proposed. Multiple matching samples can all share this systematic error. This contradicts the benchmark's requirement to verify the *specific timed utterance*, not just its presence nearby.
 
-### F04 — Stale candidate results are silently reusable against a different case
+**Required fix:** Distinguish `semantic_content_present_in_window` from `timing_correspondence_verified`. Only automatically accept a synchronization region where time-local evidence connects the matching utterance to the proposed interval, with a documented tolerance. Evaluate whether the targeted ASR backend provides usable segment timestamps or whether a bounded aligner can be used; if not, abstain on ambiguous multi-utterance windows rather than promoting a text-only match to timing proof. Keep this a B1-targeted experiment, not an implementation of the full B2 ASR pipeline.
 
-**Location:** [`benchmarks/bench/cli.py` lines 674–735, 741–790](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/cli.py#L674-L790).
+**Focused regressions:** two distinct adjacent dialogue lines; repeat one line in the padding but outside the proposed interval; wrong shift whose padded transcript still contains the subtitle text. The validator must not accept solely because an ASR transcript of the enlarged window contains that text. Include a correctly localized positive control.
 
-`run` records `input_sha256` in `run.json`, but `score` does not check it. `score` reads an existing `<case>/<candidate>/proposal.json` regardless of whether it came from the **current generation of that case**. Regenerating the same `case_id` using a different seed or changing the selected source-audio configuration can therefore lead to scoring an old proposal against the new case without a warning. `b1-va` likewise reads any existing base proposal and does not establish that its run identity matches the current case/selected audio/model settings.
+### F04 — P1: A perfect isolated-cue repair scores as false *release* discontinuities
 
-**Fix:** Bind proposal, run, acceptance, scoring, audio-selection, and cache identities to a versioned fingerprint of the *actual input case* and the *selected source media/audio stream* (and candidate/tool configuration where it matters). Refuse or explicitly mark stale results; do not quietly reuse them. Save/verifiably check output artifact checksums where useful. Ensure reference-audio cache is not reused solely on JSON metadata when the WAV file itself is corrupt or replaced.
+**Source:** `benchmarks/bench/scoring.py` `score_case()` (~200–295). **Scenario:** `S04` in `benchmarks/bench/corrupt.py`.
 
-**Acceptance:** Prepare/run case ID X with seed A; prepare X again with seed B; scoring or validator reuse **must refuse** until the candidate is rerun. Repeat with changed audio selection and tampered `reference.wav`. The expected outcomes are clear invalidation or re-extraction, not numerical scores on stale data.
+`score_case()` infers every change in adjacent cues' *applied corrections* to be a candidate release discontinuity. For a perfectly corrected S04 case with one isolated cue shifted by +2 s in the corrupted source, the ideal correction deltas are `[0, -2 s, 0]`. This produces **two** inferred breakpoints from the scorer, even though `S04` has **zero** release-edit breakpoints. The scorer records two false-positive discontinuities for a correct local repair. The result is an invalid comparison between local cue repair and global/piecewise timeline mapping. The current tests cover the S04 *no-op* case, not the perfect isolated repair.
 
-### F05 — Private-data policy has two non-ignored in-repository escape paths
+**Required fix:** Separate *local isolated cue corrections* from sustained timeline-offset change points in the discontinuity metric. Use stable support on each side, or classify a short transient-and-reversal as a local correction with an explicit `local_cue_adjustments` measure. Preserve proper penalties for real spurious **regional** discontinuities, and retain the prior gap-aware and one-to-one breakpoint credit behavior.
 
-**Location:** [`.gitignore` benchmark rules](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/.gitignore); [`benchmarks/bench/cli.py` lines 182–213, 295–334, 920–945](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/cli.py#L182-L213).
+**Focused regressions:** a perfect S04 isolated-cue repair has zero release-break false positives and correct cue-repair credit; a spurious lasting step in S00 has a false-positive release breakpoint; a correct S03 step across a cue-free gap keeps its credit.
 
-1. `source add --rights private-local` is currently allowed to register a file inside `benchmarks/fixtures/` — an intentionally **tracked/unignored** home. The rights check restricts *synthetic* rights to fixtures, but does not prevent *private* rights there. Private episode files placed there would be eligible for a normal `git add`.
-2. A custom in-repository `--root` such as `benchmarks/custom-root/` is allowed. The CLI writes `custom-root/cases/sources.json`, `custom-root/private/`, `_scratch/`, and `results/`, but the `.gitignore` only protects corresponding directories under the **default** root. Custom-root private media and paths/manifests/results may become untracked, committable files.
+## Additional issues to address within this bounded correction
 
-**Fix:** For private registrations, permit only the canonical **ignored** `benchmarks/private/` path or paths outside the Git repository, not the tracked synthetic fixture home. Disallow a custom repository-local `--root` unless it is under a proven Git-ignored safe home, or enforce a correspondingly safe `.gitignore`/`git check-ignore` policy for every generated location. `benchmarks/fixtures/` should remain available only for explicitly declared, redistributable synthetic references. Maintain the existing `benchmarks/private/README.md` exception and avoid broad ignores that hide redistributable fixture code.
+### F05 — P2: `report` can present stale results when current case/source evidence is missing
 
-**Acceptance:** In a disposable git checkout, private-local registration from `benchmarks/fixtures/E01.mkv` is refused; `--root benchmarks/custom-root` either fails safely or its generated files are proven ignored with `git check-ignore -v` and absent from ordinary `git status`/`git add -A` candidates. Confirm normal `benchmarks/private/E01/` registration and committed Fx00 fixture workflows still work.
+**Source:** `benchmarks/bench/cli.py` `cmd_report()` (~1217–1272) and `benchmarks/bench/reporting.py` `build_report()` (~14–100).
 
-## Additional correctness findings (P2)
+`cmd_report` explicitly skips recomputing the current fingerprint when the case manifest or registered source cannot be loaded, and calls `build_report` anyway. A self-consistent old `run.json`/`score.json` pair can consequently appear in `report --case OLD` despite missing present-day evidence. This is a **fail-open** path in a benchmark that otherwise refuses to score unverifiable results.
 
-### F06 — Duplicate subtitle text can still bypass positional identity protection
+**Fix/check:** If current case/source identity cannot be established, refuse to render scored rows or explicitly label them unverified historical results in a separate, non-comparative section. Do not silently treat them as current. Test deletion/invalidity of source registry and case manifest after a valid score pair.
 
-**Location:** [`benchmarks/bench/adapters.py` lines 137–210](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/adapters.py#L137-L210).
+### F06 — P2: Proposed corrections are reported as already “accepted” without any validator
 
-The new identity check matches event count and **text at each position**, which detects many reorderings. But if two cues have identical normalized text (common for repeated anime dialogue), an external tool can swap their events/timestamps without any per-position text mismatch. The mapper then assigns the other's timing to each cue. Candidate tools already demonstrated event reordering on synthetic cases, making this a realistic ambiguity.
+**Source:** `benchmarks/bench/scoring.py` (~120–125, ~177–197, output `counts`) and `benchmarks/bench/reporting.py` (~115–151).
 
-**Fix:** Require stable identity evidence for duplicate-normalized-text groups; where unavailable, mark those cues/regions unmapped rather than guessing. Consider mapping unique text first with verified order/monotonic constraints, but avoid an elaborate general matcher solely for this issue. Test a simulated sync tool swapping two identical-text cues: they must not both be accepted as correctly mapped without additional evidence.
+When no `AcceptanceRecord` is supplied, `final_times` defaults to the raw proposed times. Hence a tool-only ffsubsync/ALASS result can have `accepted_nonzero` and `harmful_accepted` counts even though no automatic acceptance decision took place. Scoring hypothetical *blind application* is useful, but the label “accepted” implies safety-gated authorization that did not happen.
 
-### F07 — Cross-language verifier bypasses ASR reliability threshold
+**Fix/check:** Retain counterfactual raw-proposal/hypothetical-apply comparisons, but display them under explicit names such as `if_blindly_applied` or `unguarded_proposal`, separately from B1-VA verified accepted changes. Document whether `final` means “candidate output” or “actual accepted output” per arm. Add one focused tool-only result test and one B1-VA result test.
 
-**Location:** [`benchmarks/bench/validator.py` lines 253–297](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/validator.py#L253-L297).
+### F07 — P2: Semantic-verifier time is charged as ASR time
 
-The same-language path checks `result.confidence >= MIN_CONFIDENCE`, but cross-language `sv.verdict == "match"` accepts even when the ASR transcript has low or missing confidence (`-1.0` is used as a fallback by the HTTP transcriber). A semantically matching model judgment over a hallucinated or unreliable transcript is not reliable timing evidence.
+**Source:** `benchmarks/bench/validator.py` `run_verifier()` (~418–465), specifically `asr_seconds += sv.seconds` (~435); `benchmarks/bench/cli.py` B1-VA `run.json` (~1070–1106).
 
-**Fix:** Use one consistent evidence/quality gate before automatic acceptance in all language paths. Missing diagnostics need not make every backend unusable: support model-specific *available* reliability signals, unknown/abstain when evidence is insufficient, and targeted additional sampling. Record ASR and semantic verifier evidence separately. Add a low-confidence-transcription + verifier-`match` regression test requiring abstention or further verification, not acceptance.
+The validator adds semantic-verifier inference duration into `asr_seconds`, while `asr_calls` still counts only transcription calls. This inflates the reported ASR runtime and prevents fair component-cost comparisons.
 
-### F08 — Registered relative sidecar/gold paths depend on the later working directory
+**Fix/check:** Record ASR and semantic-verification wall time/call counts separately, and optionally a combined end-to-end inference time. Keep existing result fields backward-readable and label the revised metrics accurately. Test with fake transcriber and verifier returning known distinct durations.
 
-**Location:** [`benchmarks/bench/cli.py` lines 171–180, 353–375, 437–510](https://github.com/cjmanca/SubHero/blob/bdb937fc4a0d846920a2072724975cb88feecc49/benchmarks/bench/cli.py#L171-L180).
+## Bounded remediation and acceptance sequence
 
-Registration checks user-given relative paths against the current working directory, but then stores `sidecar:benchmarks/...` and gold paths as relative strings. A later `run`, `case prepare`, or `score` invoked from a different working directory resolves them differently. This undermines the intended reproducibility and can lead to missing-input failures.
+1. **Validity/provenance:** F01 and F02 together. Choose one versioned binding contract, not several competing cache mechanisms. Verify real read-time invalidation and clean reruns; avoid a new database.
+2. **Temporal verification:** F03. Establish honest `match-at-time` versus `text-found-near-time` evidence. Do not add a full ASR/forced-aligner architecture just for a benchmark. If timing evidence is unavailable, abstention is the correct measured outcome.
+3. **Scoring/reporting:** F04–F07. Keep old measurement formats explicitly legacy or migrate them deliberately; do not recompute historical reports silently. Make terminology of candidate proposals versus accepted corrections unambiguous.
+4. **Review/verification:** Add **only focused tests** for each reproduced failure; run `python -m pytest benchmarks/tests -q`, `ruff check benchmarks`, `ruff format --check benchmarks`, and `git diff --check`. Independently review the diff for source-media safety, private artifacts, score correctness, and stale-output protection. Keep `Fx00` committed as the redistributable *plumbing* fixture; do not claim real-media efficacy from its tone-burst synthetic audio. Use genuine tool/model runs for measured claims.
 
-**Fix:** At registration, persist the canonical absolute path in the **ignored local registry**, or a clearly defined path relative to a stable root; never rely on the invoking shell's later CWD. Continue writing only redacted/relative identifiers into committed, redistributable manifests. Test registration from repo root followed by execution from a different CWD.
+### Required final handoff
 
-## Bounded remediation sequence for Qwen
+Report: changed paths; exact checks run and results; a small reproducible before/after example for each blocking finding; any limitations; whether old runs must be discarded/recreated; one next action. Update the existing benchmark findings and experiment registry only with observed evidence. Preserve the previous immutable plan and the orchestrator-owned status policy; no pushes, production media writes, or private episode publication.
 
-1. **M1 — Protect validity before real runs:** F01 (validator audio map), F02 (gap-aware breakpoint scoring), F03 (language-aware semantic routing), F04 (case/run provenance invalidation). Give each one directly targeted regression tests. No broad new testing framework.
-2. **M2 — Close data-safety holes:** F05, including a disposable-checkout `git add -A` safety test. Preserve the canonical private directory and legitimate synthetic fixtures.
-3. **M3 — Harden ambiguities:** F06–F08. Keep abstention as the fallback when evidence is insufficient.
-4. **M4 — Verify:** Run targeted tests, relevant existing full suite, lint/format checks, and a distinct read-only adversarial review. Report exact commands/outcomes, actual file changes, remaining findings, and one next action. Update `STATUS.md` and benchmark `findings.md` with only observed evidence; do not edit an approved frozen `PLAN.md` to report progress. Follow the project's existing orchestration/commit permissions.
-
-## Completion gates
-
-- G0 and G1 remain **pending** until real, manually verified episodes are supplied and the candidates are actually measured on them.
-- No silent acceptance or scoring of stale, mis-mapped, or unverified results.
-- No cross-language lexical-only rejection when the spoken and subtitle languages differ or cannot be proven equal.
-- No private real-episode data is normally stageable from supported repository-local media/artifact paths; the default `benchmarks/private/` area remains safe.
-- No original media file is edited. No publishing, pushing, remote repository mutation, or production integration without explicit authorization.
-
-**After successful remediation:** Register and verify E01 Japanese ASS and E02 Mandarin references under `benchmarks/private/` (or outside the repository on read-only mounts), perform G0 reference checks, and then execute the controlled G1 synchronization matrix. Preserve an independent holdout episode/series; synthetic variants of one episode are not independent evidence.
+**G0/G1 remain pending real known-good episodes.** After these fixes, register E01 Japanese ASS and E02 Mandarin with the selected original-language audio from `benchmarks/private/` (ignored except its README) or outside the repo via read-only mounts, verify the clean timing controls, and then execute the measured synchronization matrix. No production thresholds or algorithm winner should be declared before that.
