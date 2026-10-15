@@ -37,9 +37,18 @@ Discontinuity semantics (schema_version 3):
   shifts an S04 scenario injects), short in TEMPORAL DURATION (its original-onset
   span <= LOCAL_MAX_SPAN_US), and supported by neighboring anchors (each flanking
   run contributes at least LOCAL_MIN_ANCHOR_CUES cues; a run with no flanking run
-  is not sandwiched at all). Its entering/exiting steps are suppressed as
-  release-discontinuity claims and its deviating cues count additively as
+  is not sandwiched at all). Its deviating cues count additively as
   ``local_cue_adjustments`` (with their cue ids).
+  Boundary SUPPRESSION is owned by the excursions (fifth-review Finding A): a
+  step is suppressed as a release-discontinuity claim ONLY when both adjacent
+  runs are transient/edge-ambiguous, or when exactly one adjacent run is
+  transient/edge-ambiguous, that run DEVIATES (nonzero applied correction),
+  and the other side is the unmodified (zero) baseline — the entering/exiting
+  of a local correction excursion returning to the original timing. A
+  zero-value transient neighbour next to a sustained non-zero offset does NOT
+  suppress that sustained region's boundary: a sustained block hidden behind
+  short transient runs keeps its release-discontinuity claim and false-
+  positive accounting.
   A reversible run that exceeds LOCAL_MAX_CUES but stays within the declared
   borderline band (<= LOCAL_AMBIGUOUS_MAX_CUES = 2 * LOCAL_MAX_CUES) with a short
   temporal span - or a short run with missing outer anchors - is an AMBIGUOUS
@@ -57,7 +66,21 @@ Discontinuity semantics (schema_version 3):
   (the value persists to a sequence edge, or the two sides differ) likewise stays
   a change-point claim, so real regional discontinuities keep their false-positive
   penalty and a perfect inverse of an isolated S04 cue shift no longer scores as
-  two false release breaks.
+  two false release breaks. The track-boundary exception (fifth-review Finding
+  B): a ONE-CUE deviating run at a sequence edge whose only neighbour is the
+  zero baseline is classified EDGE-AMBIGUOUS — an isolated edge correction is
+  inherently ambiguous (isolated timing error vs release-specific boundary
+  offset), so it is never auto-declared a false release discontinuity solely
+  for lacking an outer anchor: its boundary claim is KEPT for localization (a
+  genuine release offset at the track boundary keeps bracketing credit when a
+  true breakpoint lies in its bracket), its cues are not auto-counted as
+  local adjustments, and an UNMATCHED edge claim is recorded explicitly as
+  ``unmatched_edge_ambiguous_claims`` with the ambiguity described in
+  ``edge_ambiguous_regions`` / ``edge_ambiguity_descriptors``, while the
+  actual timing repair and any harm to previously-correct cues are scored on
+  the cue axis independently. A deviating edge run above the
+  one-cue band (e.g. a genuine sustained offset beginning at the first cue)
+  stays SUSTAINED and keeps its claims.
 - Detection credit uses BRACKETING intervals, not a spurious sub-tolerance time
   estimate: an implied break from the a->b cue-anchor step certifies the
   DISCONTINUITY LOCATION, i.e. that the repair boundary falls between adjacent
@@ -137,6 +160,19 @@ LOCAL_AMBIGUOUS_MAX_CUES = 2 * LOCAL_MAX_CUES
 RUN_TRANSIENT = "transient"
 RUN_AMBIGUOUS = "ambiguous"
 RUN_SUSTAINED = "sustained"
+# Fifth-review Finding B: a ONE-CUE deviating run at a sequence (track) edge
+# against the unmodified baseline. It has no flanking anchor on its outer
+# side, so it is inherently ambiguous — an isolated timing error OR a
+# release-specific offset affecting the track boundary. Its boundary claim is
+# KEPT for localization (a genuine release offset at the boundary keeps
+# bracketing credit), but an UNMATCHED edge claim is recorded explicitly as
+# ``unmatched_edge_ambiguous_claims`` instead of being auto-declared a false
+# release discontinuity solely for lacking an anchor; its cues are NOT
+# auto-counted as local adjustments, and the ambiguity is described in
+# ``edge_ambiguous_regions``. A deviating edge run above the one-cue edge band
+# stays SUSTAINED: a genuine sustained offset beginning at the first cue keeps
+# its change-point claims.
+RUN_EDGE_AMBIGUOUS = "edge_ambiguous"
 
 
 @dataclass(frozen=True)
@@ -359,6 +395,19 @@ def score_case(
             0 < i < len(runs) - 1 and runs[i - 1]["value"] == runs[i + 1]["value"]
         )
         if not reversible:
+            # Fifth-review Finding B: a one-cue deviating run pressed against a
+            # sequence edge with the unmodified (zero) baseline as its only
+            # neighbor is a track-boundary local correction — inherently
+            # ambiguous, never auto-declared a release discontinuity solely
+            # because its outer anchor is missing. Longer deviating edge runs
+            # (and edge runs adjacent to non-baseline values) stay sustained,
+            # so a genuine sustained offset starting at the first cue keeps its
+            # change-point claim.
+            if len(runs) > 1 and run["value"] != 0 and len(run["cue_ids"]) == 1:
+                neighbor = runs[1] if i == 0 else runs[-2]
+                if neighbor["value"] == 0:
+                    classifications.append(RUN_EDGE_AMBIGUOUS)
+                    continue
             classifications.append(RUN_SUSTAINED)
             continue
         cue_count = len(run["cue_ids"])
@@ -379,12 +428,19 @@ def score_case(
             classifications.append(RUN_AMBIGUOUS)
         else:
             classifications.append(RUN_SUSTAINED)
-    transient = [c == RUN_TRANSIENT for c in classifications]
-    # Only cues whose applied correction actually deviates from the flanking
-    # value are local adjustments; a zero-run sandwiched between two equal
-    # shifted blocks (oscillation) suppresses its transient boundaries, but its
-    # untouched cues were never adjusted and are not counted. Sustained and
-    # ambiguous region cues are never counted as local adjustments.
+    # Fifth-review Finding A: a boundary is suppressible as a local-cue
+    # excursion ONLY by the transient / edge-ambiguous runs that OWN the
+    # entering and exiting steps of their excursion; the classification list
+    # marks which runs may own a suppression.
+    suppressible = [
+        c == RUN_TRANSIENT or c == RUN_EDGE_AMBIGUOUS for c in classifications
+    ]
+    # Only cues whose applied correction deviates from the flanking value are
+    # local adjustments; a zero run sandwiched between two equal transient
+    # shift blocks (oscillation) has its boundaries suppressed by the
+    # deviating neighbours' excursions, and its untouched cues are not
+    # counted. Sustained, ambiguous, and edge-ambiguous region cues are never
+    # counted as local adjustments.
     local_cue_ids = sorted(
         cid
         for i, run in enumerate(runs)
@@ -404,6 +460,27 @@ def score_case(
         for i, run in enumerate(runs)
         if classifications[i] == RUN_AMBIGUOUS
     ]
+    # Fifth-review Finding B: track-boundary 1-cue corrections are recorded
+    # explicitly as inherent local-vs-release ambiguities: their boundary claim
+    # is kept for localization (matching a true breakpoint in the bracket
+    # earns normal bracketing credit), an UNMATCHED edge claim is counted as
+    # ``unmatched_edge_ambiguous_claims`` instead of a false-positive release
+    # discontinuity, their cues are NOT auto-counted as local adjustments, and
+    # the timing repair / harm to previously-correct cues is scored on the cue
+    # axis independently.
+    edge_ambiguous_regions = [
+        {
+            "cue_count": len(run["cue_ids"]),
+            "cue_ids": list(run["cue_ids"]),
+            "edge": "first" if i == 0 else "last",
+            "applied_correction_us": int(run["value"]),
+            "neighbour_correction_us": int((runs[1] if i == 0 else runs[-2])["value"]),
+            "first_onset_us": onset_of(run["cue_ids"][0]),
+            "last_onset_us": onset_of(run["cue_ids"][-1]),
+        }
+        for i, run in enumerate(runs)
+        if classifications[i] == RUN_EDGE_AMBIGUOUS
+    ]
 
     # A step in applied correction between consecutive cue anchors (a, b]
     # implies a break; the gap is bounded by onset(a), onset(b) and sub-divided
@@ -415,11 +492,40 @@ def score_case(
     for k, (a, b) in enumerate(itertools.pairwise(break_order)):
         if abs(applied_correction(b) - applied_correction(a)) > jump_threshold_us:
             ra, rb = run_ids[k], run_ids[k + 1]
-            if transient[ra] or transient[rb]:
-                # Transient (short isolated) block boundary: a local cue
-                # adjustment, not a release change-point. Sustained offset
-                # regions and AMBIGUOUS borderline regions keep their claims.
-                continue
+            sa, sb = suppressible[ra], suppressible[rb]
+            edge_claim = False
+            if sa and sb:
+                if RUN_EDGE_AMBIGUOUS in (classifications[ra], classifications[rb]):
+                    edge_claim = True
+                else:
+                    # Both sides belong to transient local-cue excursions: this
+                    # step is fully explained by local-cue corrections.
+                    continue
+            elif sa != sb:
+                t, o = (ra, rb) if sa else (rb, ra)
+                if classifications[t] == RUN_EDGE_AMBIGUOUS:
+                    # Fifth-review Finding B: the sole boundary step of a
+                    # one-cue track-boundary correction keeps its localization
+                    # claim (a genuine release offset AT the boundary — e.g. a
+                    # sparse tail offset — must keep bracketing credit), but it
+                    # is tagged as an EDGE AMBIGUITY: an isolated edge
+                    # correction and a boundary release offset are
+                    # indistinguishable from the candidate side, so an
+                    # unmatched edge claim must not be auto-declared a false
+                    # release discontinuity.
+                    edge_claim = True
+                elif runs[t]["value"] != 0 and runs[o]["value"] == 0:
+                    # The deviating transient run's OWN excursion step
+                    # entering from (or returning to) the unmodified baseline:
+                    # a local cue adjustment, not a release change-point.
+                    continue
+                # Fifth-review Finding A: the suppressible neighbour is a
+                # zero-value run (an untouched gap, not a correction) next to
+                # a sustained offset — this is the sustained region's boundary
+                # and its claim survives. A neighbouring transient run must
+                # not automatically suppress the boundary of a sustained
+                # offset region; AMBIGUOUS borderline regions keep their
+                # claims, and a sustained-vs-sustained step keeps its claim.
             lo = int(per_cue[a]["original_us"][0])
             hi = int(per_cue[b]["original_us"][0])
             implied_breaks.append(hi)
@@ -432,9 +538,9 @@ def score_case(
                 # proposed boundary.
                 bounds = [lo, *interior]
                 for i in range(1, len(bounds)):
-                    claims.append((bounds[i - 1], bounds[i], hi))
+                    claims.append((bounds[i - 1], bounds[i], hi, edge_claim))
             else:
-                claims.append((lo, hi, hi))
+                claims.append((lo, hi, hi, edge_claim))
 
     true_breaks = sorted(int(t) for t in case.true_breakpoints_us)
     # Bracketing-interval, one-to-one matching (see module docstring). Brackets
@@ -446,7 +552,8 @@ def score_case(
     false_breaks = 0
     ambiguous_breaks = 0
     ambiguous_true_breakpoints = 0
-    for bracket_start, bracket_end, anchor in claims:
+    unmatched_edge_claims = 0
+    for bracket_start, bracket_end, anchor, edge_claim in claims:
         inside = [tb for tb in true_breaks if bracket_start < tb <= bracket_end]
         if len(inside) == 1:
             tb = inside[0]
@@ -463,7 +570,15 @@ def score_case(
                 }
             )
         elif len(inside) == 0:
-            false_breaks += 1
+            if edge_claim:
+                # Fifth-review Finding B: an unmatched track-boundary
+                # one-cue correction claim is recorded as an EXPLICIT edge
+                # ambiguity (isolated edge timing error vs release-specific
+                # boundary offset cannot be separated from the candidate
+                # side), never auto-declared a false release discontinuity.
+                unmatched_edge_claims += 1
+            else:
+                false_breaks += 1
         else:
             ambiguous_breaks += 1
             ambiguous_true_breakpoints += len(inside)
@@ -603,12 +718,14 @@ def score_case(
             "local_cue_adjusted_cue_ids": local_cue_ids,
             "ambiguous_offset_regions": len(ambiguous_regions),
             "ambiguous_offset_region_descriptors": ambiguous_regions,
+            "edge_ambiguous_regions": len(edge_ambiguous_regions),
+            "edge_ambiguity_descriptors": edge_ambiguous_regions,
+            "unmatched_edge_ambiguous_claims": unmatched_edge_claims,
             "transient_rule": (
                 "a maximal run of equal applied corrections flanked on BOTH "
                 "sides by runs of the SAME value is reversible (A->B->A); "
                 "reversibility alone is NOT enough: it is transient (a local "
-                "cue adjustment, its entering/exiting steps suppressed as "
-                "release-discontinuity claims, its deviating cues counted as "
+                "cue adjustment, its deviating cues counted as "
                 "local_cue_adjustments) only when it is short in cue count "
                 f"(<= {LOCAL_MAX_CUES} cues, the maximum isolated shifts an "
                 "S04 scenario injects), short in temporal duration (its "
@@ -629,7 +746,31 @@ def score_case(
                 "though its offset eventually returns to the original value, "
                 "and its cues are region corrections, not local adjustments; a "
                 "sustained step (value persists to a sequence edge, or the two "
-                "sides differ) keeps its claim"
+                "sides differ) keeps its claim. Boundary suppression is OWNED "
+                "by the excursions (fifth-review Finding A): a step is "
+                "suppressed as a release-discontinuity claim only when BOTH "
+                "adjacent runs are transient/edge-ambiguous, or when exactly "
+                "ONE adjacent run is transient/edge-ambiguous, that run "
+                "DEVIATES (nonzero applied correction), and the other side is "
+                "the unmodified (zero) baseline — i.e. the step is the "
+                "entering/exiting of a local correction excursion returning to "
+                "the original timing; a zero-value transient neighbour next to "
+                "a sustained non-zero offset does NOT suppress that sustained "
+                "region's boundary. A one-cue deviating run at a sequence "
+                "edge against the zero baseline is an EDGE-AMBIGUOUS track-"
+                "boundary correction (fifth-review Finding B): inherently "
+                "ambiguous between an isolated timing error and a release-"
+                "specific boundary offset, so its boundary claim is KEPT for "
+                "localization (a genuine release offset at the track boundary "
+                "keeps bracketing credit when a true breakpoint lies in its "
+                "bracket), its cues are NOT auto-counted as local adjustments, "
+                "and an UNMATCHED edge claim is recorded explicitly as "
+                "unmatched_edge_ambiguous_claims instead of being "
+                "auto-declared a false release discontinuity solely because "
+                "its outer anchor is missing; the ambiguity is described in "
+                "edge_ambiguous_regions/edge_ambiguity_descriptors; the actual "
+                "timing repair and any harm to previously-correct cues are "
+                "scored on the cue axis independently"
             ),
             "matching_rule": (
                 "an implied break from the a->b cue-anchor step is credited to "
