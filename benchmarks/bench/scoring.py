@@ -28,17 +28,36 @@ Discontinuity semantics (schema_version 3):
   more than jump_threshold_us = max(2 * good_us, BREAK_JUMP_FLOOR_US = 250 ms).
   An unchanged/no-op candidate therefore implies zero breakpoints and gets no
   detection credit (residual steps are NOT detection).
-- Local isolated corrections (third-review F04): group the applied-correction
-  sequence into maximal runs of equal values. A run that is flanked on BOTH
-  sides by runs of the SAME value is a transient (short-and-reversing) block:
-  the candidate adjusted isolated cues locally and returned to the surrounding
-  offset. Its boundaries are NOT release discontinuities, so the implied
-  breakpoints at the entering and exiting steps are suppressed and the cues
-  inside such a run are counted additively as ``local_cue_adjustments``
-  (with their cue ids). A sustained step (the value persists to a sequence
-  edge, or the two sides differ) stays a change-point claim, so real regional
-  discontinuities keep their false-positive penalty and a perfect inverse of
-  an isolated S04 cue shift no longer scores as two false release breaks.
+- Local corrections vs offset regions (third-review F04, corrected by M3):
+  group the applied-correction sequence into maximal runs of equal value. A run
+  flanked on BOTH sides by runs of the SAME value is REVERSIBLE (an A->B->A
+  offset sequence), and reversibility ALONE is not sufficient to call it local.
+  Such a run is classified transient (a short, isolated local-cue adjustment)
+  only when it is short in CUE COUNT (<= LOCAL_MAX_CUES = 5, the most isolated
+  shifts an S04 scenario injects), short in TEMPORAL DURATION (its original-onset
+  span <= LOCAL_MAX_SPAN_US), and supported by neighboring anchors (each flanking
+  run contributes at least LOCAL_MIN_ANCHOR_CUES cues; a run with no flanking run
+  is not sandwiched at all). Its entering/exiting steps are suppressed as
+  release-discontinuity claims and its deviating cues count additively as
+  ``local_cue_adjustments`` (with their cue ids).
+  A reversible run that exceeds LOCAL_MAX_CUES but stays within the declared
+  borderline band (<= LOCAL_AMBIGUOUS_MAX_CUES = 2 * LOCAL_MAX_CUES) with a short
+  temporal span - or a short run with missing outer anchors - is an AMBIGUOUS
+  offset region: it is represented CONSERVATIVELY and explicitly in
+  ``ambiguous_offset_regions`` (with per-region descriptors: cue count/ids,
+  applied and flanking correction, onset span); its cues are NOT auto-counted as
+  local adjustments and its breakpoint claims are NEVER suppressed.
+  A reversible run beyond that band, or temporally long (its onset span exceeds
+  LOCAL_MAX_SPAN_US), is a SUSTAINED REVERSIBLE OFFSET REGION: a region-wide
+  release-specific offset block (e.g. cues 031-230 at -2 s between 0-offset
+  blocks) whose entering AND exiting steps keep their implied-breakpoint claims,
+  so a perfectly repaired long region keeps detection credit for BOTH genuine
+  discontinuities even though its offset eventually returns to the original
+  value; its cues are region corrections, not local adjustments. A sustained step
+  (the value persists to a sequence edge, or the two sides differ) likewise stays
+  a change-point claim, so real regional discontinuities keep their false-positive
+  penalty and a perfect inverse of an isolated S04 cue shift no longer scores as
+  two false release breaks.
 - Detection credit uses BRACKETING intervals, not a spurious sub-tolerance time
   estimate: an implied break from the a->b cue-anchor step certifies the
   DISCONTINUITY LOCATION, i.e. that the repair boundary falls between adjacent
@@ -65,7 +84,10 @@ Discontinuity semantics (schema_version 3):
   resolved when the final onset residuals on both sides are equalized within
   jump_threshold_us (same applied offset), unresolved when they still step
   beyond it. A true breakpoint with no straddling cue pair is counted
-  unresolved (conservative) and reported separately.
+  unresolved (conservative) and reported separately. This timing-recovery
+  measurement is INDEPENDENT of the transient / ambiguous / sustained
+  classification above: it reads only the final-timeline residuals, never the
+  run classification.
 - Offset recovery (S01): Segment.apply in timeline.py shows corruption is
   corrupted = original + params.offset_us (verified against committed
   Fx00-S01.case.json: injected deltas equal +offset_us). fit_regions region
@@ -83,6 +105,32 @@ from .manifests import AcceptanceRecord, CaseManifest, ProposalRecord
 BREAK_JUMP_FLOOR_US = 250_000
 OFFSET_RECOVERY_STATUSES = ("1:1-order-preserving", "noop")
 SCORE_SCHEMA_VERSION = 3
+
+# M3 local-correction vs offset-region bounds. These are declared evaluation
+# parameters reported with every result (like Tolerances); they are NOT
+# calibrated production thresholds.
+# S04 (corrupt.py) injects at most 5 isolated cue shifts per case
+# (n = rng.integers(1, min(6, len(cues)))), so 5 cues is the largest block an
+# isolated-cue corruption scenario produces: a sandwiched run of at most this
+# many cues can be a local isolated correction.
+LOCAL_MAX_CUES = 5
+# A local isolated correction must also be temporally short. An S04 shift is
+# bounded by ±5 s per cue, and 5 adjacent cues at typical subtitle density
+# (about one cue every few seconds) span well under 30 s, while a genuine
+# release-offset region (e.g. the plan's 200-cue middle section) spans minutes.
+# 30 s is the declared duration bound for transient eligibility.
+LOCAL_MAX_SPAN_US = 30_000_000
+# An entering/exiting step is supported by neighboring anchors only when each
+# flanking run contributes at least this many cues (the anchors that bracket the
+# run from the outer sides). Runs at a sequence edge have no flanking run and are
+# never sandwiched/transient.
+LOCAL_MIN_ANCHOR_CUES = 1
+# Reversible runs above LOCAL_MAX_CUES up to this bound with a short temporal
+# span (and short runs with missing outer anchors) are inherently ambiguous:
+# classified conservatively as AMBIGUOUS offset regions — claims kept, cues never
+# auto-counted as local adjustments, reported explicitly — rather than being
+# silently swallowed as local adjustments.
+LOCAL_AMBIGUOUS_MAX_CUES = 2 * LOCAL_MAX_CUES
 
 
 @dataclass(frozen=True)
@@ -272,13 +320,19 @@ def score_case(
         prev_offset = offset
     proposed_edges = sorted(set(proposed_edges))
 
-    # F04: stable-support classification of applied corrections. Group the
+    # F04 + M3: stable-support classification of applied corrections. Group the
     # sequence (in original onset order) into maximal runs of equal applied
-    # correction. A run flanked on BOTH sides by runs of the SAME value is a
-    # transient local-cue adjustment block: the candidate moved isolated cues
-    # and reversed back to the surrounding offset, so its entering/exiting
-    # steps are NOT release discontinuities. A sustained step (the new value
-    # persists to a sequence edge, or the two sides differ) keeps its claim.
+    # correction. A run flanked on BOTH sides by runs of the SAME value is
+    # REVERSIBLE (A->B->A), which alone does NOT make it local: a long middle
+    # section at a release-specific offset also returns to the surrounding value
+    # and contains two genuine discontinuities. A reversible run is classified
+    # transient (short isolated local-cue adjustment) only when it is short in
+    # cue count, short in temporal duration, and supported by outer anchors; it
+    # is classified AMBIGUOUS when it sits in the declared borderline band
+    # (claims kept, cues not auto-counted, reported explicitly); otherwise it is
+    # a SUSTAINED REVERSIBLE OFFSET REGION whose entering/exiting steps keep
+    # their implied-breakpoint claims. A step that is not reversible (the value
+    # persists to a sequence edge, or the two sides differ) stays a claim.
     run_ids: list[int] = []
     runs: list[dict] = []
     for cid in break_order:
@@ -289,20 +343,57 @@ def score_case(
         else:
             runs.append({"value": v, "cue_ids": [cid]})
             run_ids.append(len(runs) - 1)
-    transient = [False] * len(runs)
-    for i in range(1, len(runs) - 1):
-        if runs[i - 1]["value"] == runs[i + 1]["value"]:
-            transient[i] = True
+
+    def onset_of(cid: str) -> int:
+        return int(per_cue[cid]["original_us"][0])
+
+    classifications: list[str] = []
+    for i, run in enumerate(runs):
+        reversible = (
+            0 < i < len(runs) - 1 and runs[i - 1]["value"] == runs[i + 1]["value"]
+        )
+        if not reversible:
+            classifications.append("sustained")
+            continue
+        cue_count = len(run["cue_ids"])
+        span_us = onset_of(run["cue_ids"][-1]) - onset_of(run["cue_ids"][0])
+        anchors = (
+            len(runs[i - 1]["cue_ids"]) >= LOCAL_MIN_ANCHOR_CUES
+            and len(runs[i + 1]["cue_ids"]) >= LOCAL_MIN_ANCHOR_CUES
+        )
+        temporally_short = span_us <= LOCAL_MAX_SPAN_US
+        if anchors and cue_count <= LOCAL_MAX_CUES and temporally_short:
+            classifications.append("transient")
+        elif cue_count <= LOCAL_AMBIGUOUS_MAX_CUES and temporally_short:
+            # Borderline short region: conservative and explicit, never silent.
+            classifications.append("ambiguous")
+        else:
+            classifications.append("sustained")
+    transient = [c == "transient" for c in classifications]
     # Only cues whose applied correction actually deviates from the flanking
     # value are local adjustments; a zero-run sandwiched between two equal
     # shifted blocks (oscillation) suppresses its transient boundaries, but its
-    # untouched cues were never adjusted and are not counted.
+    # untouched cues were never adjusted and are not counted. Sustained and
+    # ambiguous region cues are never counted as local adjustments.
     local_cue_ids = sorted(
         cid
         for i, run in enumerate(runs)
-        if transient[i] and run["value"] != 0
+        if classifications[i] == "transient" and run["value"] != 0
         for cid in run["cue_ids"]
     )
+    ambiguous_regions = [
+        {
+            "cue_count": len(run["cue_ids"]),
+            "cue_ids": list(run["cue_ids"]),
+            "applied_correction_us": int(run["value"]),
+            "flanking_correction_us": int(runs[i - 1]["value"]),
+            "first_onset_us": onset_of(run["cue_ids"][0]),
+            "last_onset_us": onset_of(run["cue_ids"][-1]),
+            "onset_span_us": onset_of(run["cue_ids"][-1]) - onset_of(run["cue_ids"][0]),
+        }
+        for i, run in enumerate(runs)
+        if classifications[i] == "ambiguous"
+    ]
 
     # A step in applied correction between consecutive cue anchors (a, b]
     # implies a break; the gap is bounded by onset(a), onset(b) and sub-divided
@@ -315,8 +406,9 @@ def score_case(
         if abs(applied_correction(b) - applied_correction(a)) > jump_threshold_us:
             ra, rb = run_ids[k], run_ids[k + 1]
             if transient[ra] or transient[rb]:
-                # Transient block boundary: a local cue adjustment, not a
-                # sustained release change-point (no false-positive claim).
+                # Transient (short isolated) block boundary: a local cue
+                # adjustment, not a release change-point. Sustained offset
+                # regions and AMBIGUOUS borderline regions keep their claims.
                 continue
             lo = int(per_cue[a]["original_us"][0])
             hi = int(per_cue[b]["original_us"][0])
@@ -499,14 +591,35 @@ def score_case(
             "true_breakpoints_without_straddle_pair": no_straddle_pair,
             "local_cue_adjustments": len(local_cue_ids),
             "local_cue_adjusted_cue_ids": local_cue_ids,
+            "ambiguous_offset_regions": len(ambiguous_regions),
+            "ambiguous_offset_region_descriptors": ambiguous_regions,
             "transient_rule": (
                 "a maximal run of equal applied corrections flanked on BOTH "
-                "sides by runs of the SAME value is a transient local-cue "
-                "adjustment block (isolated cue shifts reversed back to the "
-                "surrounding offset): its entering/exiting steps are not "
-                "release discontinuities and its cues count as "
-                "local_cue_adjustments; a sustained step (value persists to a "
-                "sequence edge, or the two sides differ) keeps its claim"
+                "sides by runs of the SAME value is reversible (A->B->A); "
+                "reversibility alone is NOT enough: it is transient (a local "
+                "cue adjustment, its entering/exiting steps suppressed as "
+                "release-discontinuity claims, its deviating cues counted as "
+                "local_cue_adjustments) only when it is short in cue count "
+                f"(<= {LOCAL_MAX_CUES} cues, the maximum isolated shifts an "
+                "S04 scenario injects), short in temporal duration (its "
+                f"original-onset span <= {LOCAL_MAX_SPAN_US} us) and supported "
+                f"by outer anchors (each flanking run has >= "
+                f"{LOCAL_MIN_ANCHOR_CUES} cue); a reversible run above that "
+                f"bound within the borderline band (<= "
+                f"{LOCAL_AMBIGUOUS_MAX_CUES} cues) with a short temporal span, "
+                "or a short run with missing outer anchors, is an AMBIGUOUS "
+                "offset region: its claims are kept, its cues are NOT counted "
+                "as local adjustments, and it is reported explicitly in "
+                "ambiguous_offset_regions with descriptors; any other "
+                "reversible run is a SUSTAINED REVERSIBLE OFFSET REGION "
+                "(release-specific offset block, e.g. cues 031-230 at -2s "
+                "between 0-offset blocks): its entering AND exiting steps keep "
+                "their implied-breakpoint claims, so a perfectly repaired long "
+                "region keeps detection credit for both discontinuities even "
+                "though its offset eventually returns to the original value, "
+                "and its cues are region corrections, not local adjustments; a "
+                "sustained step (value persists to a sequence edge, or the two "
+                "sides differ) keeps its claim"
             ),
             "matching_rule": (
                 "an implied break from the a->b cue-anchor step is credited to "
@@ -523,7 +636,9 @@ def score_case(
                 "a true breakpoint is unresolved when the final onset residuals "
                 "of the straddling cue pair (original onset order) still step "
                 "beyond jump_threshold_us; equalized within it means resolved; "
-                "no straddling pair counts unresolved conservatively"
+                "no straddling pair counts unresolved conservatively; this "
+                "timing-recovery measurement is independent of the transient/"
+                "ambiguous/sustained classification of the candidate's claims"
             ),
         },
         "offset_recovery": offset_recovery,
