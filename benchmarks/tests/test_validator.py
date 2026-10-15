@@ -32,7 +32,9 @@ def test_semantic_match_requires_correspondence_not_activity():
 
 def test_samples_cover_edges_split_sides_and_controls(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "va-samp", "S00", 2, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "va-samp", "S00", 2, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     times = corrupted.time_map()
     proposal = _proposal(times)
@@ -45,7 +47,9 @@ def test_samples_cover_edges_split_sides_and_controls(fixture_dir, tmp_path):
 
 def test_validator_without_model_is_not_run_not_fabricated(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "va-notrun", "S01", 2, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "va-notrun", "S01", 2, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     proposal = _proposal(corrupted.time_map())
     acc = validate_proposal(
@@ -66,7 +70,9 @@ def test_validator_without_model_is_not_run_not_fabricated(fixture_dir, tmp_path
 
 def test_mock_transcriber_never_auto_accepts(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "va-mock", "S01", 2, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "va-mock", "S01", 2, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     cue_text = {c.cue_id: c.text for c in corrupted.cues}
     proposal = _proposal(corrupted.time_map())

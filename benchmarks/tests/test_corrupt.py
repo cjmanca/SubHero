@@ -17,7 +17,9 @@ def _copy_fixture_episode(dst: Path) -> Path:
 
 def test_s00_control_is_unchanged(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "c-s00", "S00", 7, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "c-s00", "S00", 7, src, tmp_path / "out.ass", track_id="episode"
+    )
     original = Track.load(src)
     generated = Track.load(Path(case.generated_path))
     assert original.time_map() == generated.time_map()
@@ -29,8 +31,12 @@ def test_s00_control_is_unchanged(tmp_path, fixture_dir):
 
 def test_determinism_same_seed(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    c1 = prepare_case("Fx00", "c1", "S03", 42, src, tmp_path / "a" / "out.ass")
-    c2 = prepare_case("Fx00", "c2", "S03", 42, src, tmp_path / "b" / "out.ass")
+    c1 = prepare_case(
+        "Fx00", "c1", "S03", 42, src, tmp_path / "a" / "out.ass", track_id="episode"
+    )
+    c2 = prepare_case(
+        "Fx00", "c2", "S03", 42, src, tmp_path / "b" / "out.ass", track_id="episode"
+    )
     assert c1.generated_subtitle_sha256 == c2.generated_subtitle_sha256
     assert c1.transform == c2.transform
     assert c1.injected_cue_deltas == c2.injected_cue_deltas
@@ -51,6 +57,7 @@ def test_inverse_recovers_originals_for_all_scenarios(tmp_path, fixture_dir):
             src,
             tmp_path / f"{scenario}.ass",
             notes=scenario,
+            track_id="episode",
         )
         inv = Transform.from_dict(case.transform).inverse(track.grid_us)
         generated = Track.load(Path(case.generated_path))
@@ -71,7 +78,9 @@ def test_inverse_recovers_originals_for_all_scenarios(tmp_path, fixture_dir):
 def test_cue_identity_and_text_preserved(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
     original = Track.load(src)
-    case = prepare_case("Fx00", "c-id", "S03", 5, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "c-id", "S03", 5, src, tmp_path / "out.ass", track_id="episode"
+    )
     generated = Track.load(Path(case.generated_path))
     assert [c.cue_id for c in original.cues] == [c.cue_id for c in generated.cues]
     assert [c.text for c in original.cues] == [c.text for c in generated.cues]
@@ -89,7 +98,15 @@ def test_negative_start_is_rejected(tmp_path):
     doc.save(ass, format="ass")
     with pytest.raises(InvalidTime):
         for seed in range(500):
-            prepare_case("T", f"n{seed}", "S01", seed, ass, tmp_path / f"out{seed}.ass")
+            prepare_case(
+                "T",
+                f"n{seed}",
+                "S01",
+                seed,
+                ass,
+                tmp_path / f"out{seed}.ass",
+                track_id="tiny",
+            )
         pytest.fail(
             "no seed produced an invalid negative timeline; generator guards untested"
         )
@@ -98,11 +115,11 @@ def test_negative_start_is_rejected(tmp_path):
 def test_original_never_overwritten(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
     with pytest.raises(ValueError):
-        prepare_case("Fx00", "bad", "S01", 3, src, src)
+        prepare_case("Fx00", "bad", "S01", 3, src, src, track_id="episode")
 
 
 def test_source_file_immutable_after_prepare(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
     before = sha256_file(src)
-    prepare_case("Fx00", "imm", "S02", 9, src, tmp_path / "out.ass")
+    prepare_case("Fx00", "imm", "S02", 9, src, tmp_path / "out.ass", track_id="episode")
     assert sha256_file(src) == before

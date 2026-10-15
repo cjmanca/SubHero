@@ -1,4 +1,4 @@
-"""Provenance binding of b1-va acceptance + report fingerprint binding + sidecar stem alias.
+"""Provenance binding of b1-va acceptance + report fingerprint binding + track identity.
 
 Negative-control regressions reproducing the acceptance-blocking findings from the
 adversarial review of the remediation range:
@@ -11,9 +11,10 @@ adversarial review of the remediation range:
   bound nothing; reports rendered unbound rows. Score rows now embed the verified
   ``input_fingerprint`` and the report binds each row to a fingerprint-matching
   ``run.json``, dropping (and counting) unbound rows.
-* P2-1 — the sidecar stem alias leaked identities across same-stem tracks; the
-  alias is now stored only for a unique sidecar stem, and a collided stem yields
-  the identity-unknown abstain path (never a wrong-identity lexical reject).
+* P2-1 (superseded by M1) — the sidecar stem-alias bridge leaked identities
+  across same-stem tracks. It is now GONE: ``CaseManifest.track_id`` persists
+  the REGISTERED track id, ``subtitle_languages`` is keyed only by registered
+  ids, and each case resolves its own track's identity directly.
 """
 
 from __future__ import annotations
@@ -521,7 +522,7 @@ def test_report_drops_score_with_no_run_json(tmp_path, fixture_dir):
 
 
 # ---------------------------------------------------------------------------
-# P2-1: sidecar stem alias uniqueness
+# P2-1/M1: same-stem sidecar tracks keep registered identities
 # ---------------------------------------------------------------------------
 
 
@@ -561,20 +562,25 @@ def test_same_stem_sidecar_tracks_have_no_stem_alias(tmp_path, fixture_dir):
     langs = _record(root)["subtitle_languages"]
     assert langs.get("a") == "eng"
     assert langs.get("b") == "kor"
-    assert "ep" not in langs  # collision => stem alias NOT stored
+    # M1: no file-stem aliases are stored at all; keys are registered ids only.
+    assert "ep" not in langs
+    assert set(langs) <= {"a", "b"}
 
 
-def test_collided_sidecar_run_is_identity_unknown_never_wrong_identity(
+def test_same_stem_sidecar_tracks_resolve_registered_identity(
     tmp_path, fixture_dir, monkeypatch
 ):
+    """M1 replaces the P2-1 collided-stem abstain workaround at its root: with the
+    manifest persisting the REGISTERED id, each same-stem sidecar track resolves
+    its OWN language — no stem key, no cross-track leakage, no identity-unknown
+    from a filename collision."""
     root = _register_two_same_stem(tmp_path, fixture_dir)
-    # Prepare a case from track b (kor sidecar); corrupt.py records track_id = stem "ep".
     assert _prepare(root, "COLL", "S01", 1, track="b") == 0
     paths = cli._paths(root)
     case = cli._load_case(cli._lookup_case_path(paths, "COLL"))
-    assert case.track_id == "ep"
-    # No stem key exists, so registry resolution must NOT return a language.
-    assert (case.track_id in (_record(root)["subtitle_languages"])) is False
+    assert case.track_id == "b"  # registered id, not the shared stem "ep"
+    langs = _record(root)["subtitle_languages"]
+    assert langs.get(case.track_id) == "kor"  # track b's own language hint
 
     captured: dict = {}
 
@@ -605,9 +611,10 @@ def test_collided_sidecar_run_is_identity_unknown_never_wrong_identity(
     monkeypatch.setattr(cli, "validate_proposal", _fake_validate)
     assert _run(root, "COLL") == 0
     assert _run_va(root, "COLL") == 0
-    # Identity-unknown path: the target hint stays "und" (never the leaked eng/kor).
+    # Track b resolves its own kor identity (never the a-track eng leak); the
+    # audio identity is unchanged.
     assert captured["language"] == "eng"  # audio identity from the selected stream
-    assert captured["subtitle_language"] == "und"  # collided stem resolves to nothing
+    assert captured["subtitle_language"] == "kor"  # track b's registered hint
 
 
 def test_collided_sidecar_genuine_run_produces_zero_rejects(
@@ -626,7 +633,9 @@ def test_collided_sidecar_genuine_run_produces_zero_rejects(
     assert acc.rejected_regions == []
 
 
-def test_single_sidecar_stem_alias_still_resolves(tmp_path, fixture_dir, monkeypatch):
+def test_single_sidecar_resolves_registered_track_id_without_alias(
+    tmp_path, fixture_dir, monkeypatch
+):
     media = _build_mkv(tmp_path)
     root = tmp_path / "benchroot"
     sidecar = tmp_path / "solo.ass"
@@ -648,10 +657,11 @@ def test_single_sidecar_stem_alias_still_resolves(tmp_path, fixture_dir, monkeyp
     )
     langs = _record(root)["subtitle_languages"]
     assert langs.get("m") == "kor"
-    assert langs.get("solo") == "kor"  # unique stem keeps the working alias
+    # M1: languages are keyed by registered ids only; the unique-stem alias is gone.
+    assert langs == {"m": "kor"}
     assert _prepare(root, "SOLO", "S01", 1, track="m") == 0
     case = cli._load_case(cli._lookup_case_path(cli._paths(root), "SOLO"))
-    assert case.track_id == "solo"
+    assert case.track_id == "m"
 
     captured: dict = {}
 
@@ -677,7 +687,7 @@ def test_single_sidecar_stem_alias_still_resolves(tmp_path, fixture_dir, monkeyp
     assert _run_va(root, "SOLO") == 0
     assert (
         captured["subtitle_language"] == "kor"
-    )  # stem alias bridges the case track_id
+    )  # the registered track id resolves the hint directly
 
 
 # ---------------------------------------------------------------------------

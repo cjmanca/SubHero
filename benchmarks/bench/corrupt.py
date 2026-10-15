@@ -133,9 +133,22 @@ def prepare_case(
     fmt: str | None = None,
     gold_classification_path: Path | None = None,
     notes: str = "",
+    *,
+    track_id: str,
 ) -> CaseManifest:
+    """Build one corrupted case from an explicitly selected source track.
+
+    ``track_id`` is the caller's **registered subtitle-track identifier** and
+    is persisted verbatim into the case manifest. It is never derived from
+    ``source_track_path``: for sidecar registrations the file stem is not the
+    registry key, and stem-derived identities broke registry lookups (language
+    resolution, source fingerprints, gold annotations) for every case whose
+    registered id differed from the sidecar filename.
+    """
     if scenario not in SCENARIOS:
         raise ValueError(f"scenario must be one of {SCENARIOS}")
+    if not track_id:
+        raise ValueError("track_id must be the registered subtitle-track identifier")
     if Path(out_path).resolve() == Path(source_track_path).resolve():
         raise ValueError(
             "refusing to write a corrupted case over the original source track"
@@ -174,7 +187,7 @@ def prepare_case(
         source_id=source_id,
         scenario=scenario,
         seed=seed,
-        track_id=source_track_path.stem,
+        track_id=track_id,
         fmt=track.format,
         grid_us=track.grid_us,
         params=params,

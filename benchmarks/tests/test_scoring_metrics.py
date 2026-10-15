@@ -10,7 +10,9 @@ def _case(tmp_path):
         "[Script Info]\nScriptType: v4.00+\n\n[V4 Styles]\nFormat: Name, Fontname, Fontsize\nStyle: Dialog,Arial,28\n\n[Events]\nFormat: Layer, Start, End, Style, Text\nDialogue: 0,0:00:01.00,0:00:03.00,Dialog,Hello\nDialogue: 0,0:00:11.00,0:00:13.00,Dialog,World\nDialogue: 0,0:00:21.00,0:00:23.00,Dialog,Again\n",
         encoding="utf-8",
     )
-    return prepare_case("T", "c1", "S01", 3, src, tmp_path / "out.ass")
+    return prepare_case(
+        "T", "c1", "S01", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
 
 
 def test_exact_offset_recovery_residual_zero(tmp_path):

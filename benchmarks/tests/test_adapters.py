@@ -22,7 +22,9 @@ def _tools(offset_ms: int) -> ToolConfig:
 
 def test_noop_proposes_nothing(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-noop", "S01", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-noop", "S01", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     proposal, _meta = run_candidate(
         "b1-n",
@@ -42,7 +44,9 @@ def test_noop_proposes_nothing(fixture_dir, tmp_path):
 
 def test_stub_adapter_produces_global_region_proposal(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-fg", "S01", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-fg", "S01", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     proposal, _meta = run_candidate(
         "b1-fg",
@@ -65,7 +69,9 @@ def test_stub_adapter_produces_global_region_proposal(fixture_dir, tmp_path):
 
 def test_proxy_adapter_maps_back_by_cue_id(fixture_dir, tmp_path):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-px", "S01", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-px", "S01", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     proposal, _meta = run_candidate(
         "b1-px-fg",
@@ -94,7 +100,9 @@ def test_proxy_adapter_maps_back_by_cue_id(fixture_dir, tmp_path):
 
 def test_signs_only_proxy_abstains_without_inventing_map(fixture_dir, tmp_path):
     src = fixture_dir / "signs.ass"
-    case = prepare_case("Fx00", "ad-px-signs", "S01", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-px-signs", "S01", 3, src, tmp_path / "out.ass", track_id="signs"
+    )
     corrupted = Track.load(Path(case.generated_path))
     proposal, _meta = run_candidate(
         "b1-px-fg",
@@ -113,7 +121,9 @@ def test_signs_only_proxy_abstains_without_inventing_map(fixture_dir, tmp_path):
 
 def test_missing_ffsubsync_is_not_run(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-missing", "S00", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-missing", "S00", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     tools = ToolConfig()
     tools.ffsubsync = None
@@ -132,7 +142,9 @@ def test_missing_ffsubsync_is_not_run(tmp_path, fixture_dir):
 
 def test_missing_alass_is_unsupported(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-al", "S00", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-al", "S00", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     tools = ToolConfig()
     tools.alass = None
@@ -151,7 +163,9 @@ def test_missing_alass_is_unsupported(tmp_path, fixture_dir):
 
 def test_count_mismatch_output_is_mapping_failure(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("Fx00", "ad-bad", "S00", 3, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "Fx00", "ad-bad", "S00", 3, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     stub = tmp_path / "stub_drop.py"
     stub.write_text(

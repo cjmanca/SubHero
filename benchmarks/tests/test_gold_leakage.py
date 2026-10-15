@@ -321,6 +321,7 @@ def test_prepare_case_stores_gold_classification_path(tmp_path, fixture_dir):
         fixture_dir / "episode.ass",
         tmp_path / "out.ass",
         gold_classification_path=fixture_dir / "gold_episode.json",
+        track_id="episode",
     )
     assert case.gold_classification_path == str(fixture_dir / "gold_episode.json")
     payload = json.loads(json.dumps(case.to_json()))

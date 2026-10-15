@@ -430,7 +430,13 @@ def test_fingerprint_v2_binds_ground_truth_gold_and_subtitle_input(
         "subtitle_sha256": {"episode": "b" * 64},
     }
     case = prepare_case(
-        "MS", "fp2", "S04", 4, fixture_dir / "episode.ass", tmp_path / "fp2.ass"
+        "MS",
+        "fp2",
+        "S04",
+        4,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp2.ass",
+        track_id="episode",
     )
     base = compute_input_fingerprint(case, source, "b1-n", {}, "g" * 64)
     payload = fingerprint_payload(case, source, "b1-n", {}, "g" * 64)
@@ -448,14 +454,26 @@ def test_fingerprint_v2_binds_ground_truth_gold_and_subtitle_input(
     s, e = edited_times[first]
     edited_times[first] = (s + 1_000_000, e)
     case2 = prepare_case(
-        "MS", "fp2", "S04", 4, fixture_dir / "episode.ass", tmp_path / "fp2b.ass"
+        "MS",
+        "fp2",
+        "S04",
+        4,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp2b.ass",
+        track_id="episode",
     )
     case2.original_times_us = edited_times
     assert compute_input_fingerprint(case2, source, "b1-n", {}, "g" * 64) != base
     edited_deltas = dict(case.injected_cue_deltas)
     edited_deltas[first] = (edited_deltas[first][0] + 10_000, edited_deltas[first][1])
     case3 = prepare_case(
-        "MS", "fp2", "S04", 4, fixture_dir / "episode.ass", tmp_path / "fp2c.ass"
+        "MS",
+        "fp2",
+        "S04",
+        4,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp2c.ass",
+        track_id="episode",
     )
     case3.injected_cue_deltas = edited_deltas
     assert compute_input_fingerprint(case3, source, "b1-n", {}, "g" * 64) != base

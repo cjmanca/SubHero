@@ -27,7 +27,9 @@ def _tools(offset_ms: int) -> ToolConfig:
 def test_full_track_mapping_preserves_file_order_for_unsorted_events(tmp_path):
     src = tmp_path / "episode.ass"
     src.write_text(UNSORTED, encoding="utf-8")
-    case = prepare_case("T", "ord", "S00", 1, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "T", "ord", "S00", 1, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(case.generated_path, case.fmt)
     corrupted_times = corrupted.time_map()
     proposal, _meta = run_candidate(
@@ -57,7 +59,9 @@ def test_breakpoint_detection_lives_in_original_timeline(tmp_path):
         ),
         encoding="utf-8",
     )
-    case = prepare_case("T", "bp", "S03", 5, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "T", "bp", "S03", 5, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(case.generated_path, case.fmt)
     corrupted_times = corrupted.time_map()
     original_times = {
@@ -128,7 +132,9 @@ def test_breakpoint_detection_lives_in_original_timeline(tmp_path):
 def test_noop_is_not_counted_as_abstention(tmp_path):
     src = tmp_path / "episode.ass"
     src.write_text(UNSORTED, encoding="utf-8")
-    case = prepare_case("T", "ab", "S00", 1, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "T", "ab", "S00", 1, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(case.generated_path, case.fmt)
     noop = ProposalRecord(
         "ab",
@@ -147,7 +153,9 @@ def test_noop_is_not_counted_as_abstention(tmp_path):
 def test_end_errors_are_scored(tmp_path):
     src = tmp_path / "episode.ass"
     src.write_text(UNSORTED, encoding="utf-8")
-    case = prepare_case("T", "end", "S04", 7, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "T", "end", "S04", 7, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(case.generated_path, case.fmt)
     noop = ProposalRecord("end", "b1-n", "noop", [], dict(corrupted.time_map()), [], "")
     score = score_case(
@@ -169,7 +177,13 @@ def test_zero_injection_guard_rejects_undetected_drift(tmp_path, fixture_dir):
     for seed in range(40):
         try:
             case = prepare_case(
-                "Fx00", f"z{seed}", "S02", seed, src, tmp_path / f"z{seed}.ass"
+                "Fx00",
+                f"z{seed}",
+                "S02",
+                seed,
+                src,
+                tmp_path / f"z{seed}.ass",
+                track_id="episode",
             )
         except ValueError as exc:
             if "no grid-detectable" in str(exc):

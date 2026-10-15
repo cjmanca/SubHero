@@ -468,7 +468,13 @@ def test_validate_proposal_windows_use_reference_wav_stream_zero(
 
     monkeypatch.setattr(validator, "extract_audio_window", _fake_extract)
     case = prepare_case(
-        "Fx00", "va-thread", "S01", 2, fixture_dir / "episode.ass", tmp_path / "out.ass"
+        "Fx00",
+        "va-thread",
+        "S01",
+        2,
+        fixture_dir / "episode.ass",
+        tmp_path / "out.ass",
+        track_id="episode",
     )
     corrupted = Track.load(case.generated_path, case.fmt)
     times = corrupted.time_map()
@@ -862,9 +868,10 @@ def test_sidecar_subtitle_language_hint_recorded(tmp_path, fixture_dir):
     assert rc == 0
     rec = _record(root, "MS")
     assert rec["subtitle_languages"]["main"] == "kor"
-    # A prepared sidecar case records track_id = file stem, so the hint is also
-    # aliased by stem for the run to resolve the target identity.
-    assert rec["subtitle_languages"]["episode"] == "kor"
+    # M1: the case manifest persists the REGISTERED track id, so the run can
+    # resolve the hint directly. No file-stem aliases are stored — the old
+    # stem-alias bridge existed only to paper over stem-based track_ids.
+    assert "episode" not in rec["subtitle_languages"]
 
 
 def test_bad_subtitle_language_spec_refused(tmp_path, capsys):

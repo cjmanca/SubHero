@@ -261,7 +261,13 @@ def test_fingerprint_is_deterministic_and_bound_to_fields(fixture_dir, tmp_path)
     from bench.corrupt import prepare_case
 
     case = prepare_case(
-        "MS", "fp-case", "S01", 3, fixture_dir / "episode.ass", tmp_path / "fp.ass"
+        "MS",
+        "fp-case",
+        "S01",
+        3,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp.ass",
+        track_id="main",
     )
     fp = compute_input_fingerprint(case, source, "b1-n")
     assert fp == compute_input_fingerprint(case, source, "b1-n")
@@ -273,10 +279,22 @@ def test_fingerprint_is_deterministic_and_bound_to_fields(fixture_dir, tmp_path)
     )
     # Seed is bound even when the generated artifact is byte-identical (S00 control).
     control = prepare_case(
-        "MS", "fp-ctrl", "S00", 1, fixture_dir / "episode.ass", tmp_path / "fp00.ass"
+        "MS",
+        "fp-ctrl",
+        "S00",
+        1,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp00.ass",
+        track_id="main",
     )
     control2 = prepare_case(
-        "MS", "fp-ctrl", "S00", 2, fixture_dir / "episode.ass", tmp_path / "fp00b.ass"
+        "MS",
+        "fp-ctrl",
+        "S00",
+        2,
+        fixture_dir / "episode.ass",
+        tmp_path / "fp00b.ass",
+        track_id="main",
     )
     assert control.generated_subtitle_sha256 == control2.generated_subtitle_sha256
     assert compute_input_fingerprint(

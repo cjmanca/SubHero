@@ -399,6 +399,33 @@ def _verify_sources(
     return problems
 
 
+def _unregistered_track_reason(case: CaseManifest, source: dict) -> str:
+    """Return a refusal reason when the case manifest's track id is not a
+    registered subtitle-track id of the source record; the empty string when
+    it is.
+
+    M1 identity policy: ``CaseManifest.track_id`` is the registered track id.
+    Pre-fix manifests persisted the sidecar **file stem**, which is not a
+    registry key whenever the registered id differs (e.g. ``main=sidecar:
+    episode.ass`` persisted ``episode``). Such on-disk manifests are handled
+    DELIBERATELY: every consumer of a loaded manifest (run, score, report)
+    checks the identity against ``source["subtitle_specs"]`` FIRST and refuses
+    with an actionable re-prepare message. The identity is never silently
+    reinterpreted, and a registry lookup returning ``None`` is never hashed
+    into a fingerprint as a valid subtitle binding.
+    """
+    specs = source.get("subtitle_specs")
+    if isinstance(specs, dict) and case.track_id in specs:
+        return ""
+    return (
+        f"case manifest track_id {case.track_id!r} is not registered for source "
+        f"{case.source_id}; the manifest predates registered-track-id case "
+        f"preparation. Re-prepare the case: case prepare --source-id "
+        f"{case.source_id} --track-id <registered track id> (see: source inspect "
+        f"--source-id {case.source_id})"
+    )
+
+
 def _gold_content_sha256(paths: dict[str, Path], case: CaseManifest) -> str | None:
     """Live content hash of the case's gold-classification file (F02 binding).
 
@@ -835,33 +862,16 @@ def cmd_source_add(args, paths) -> int:
     # MKV subtitle tracks carry an embedded ffprobe language tag; capture it so
     # the run consumes a verified target identity. Sidecar tracks have no
     # embedded tag, so they rely on the explicit --subtitle-language hint above.
+    # M1: `subtitle_languages` is keyed ONLY by the registered track ids. The
+    # case manifest persists the registered id (cmd_case_prepare passes it to
+    # prepare_case), so `cmd_run` resolves the target identity via
+    # `subtitle_languages.get(case.track_id)` directly. The old file-stem alias
+    # bridge is removed: it existed only to paper over the stem-based
+    # `case.track_id`, leaked identities across same-stem sidecar tracks, and
+    # made registry lookups ambiguous.
     for track_id, sel in subtitle_selected.items():
         if track_id not in subtitle_languages and sel.get("language"):
             subtitle_languages[track_id] = sel["language"]
-    # A prepared case records a sidecar track by its file stem (corrupt.py sets
-    # track_id = source_track_path.stem), so alias each sidecar hint by stem too
-    # for the run to look the identity up by the case's persisted track_id. The
-    # alias exists ONLY to bridge that stem-based track_id for the single-sidecar
-    # case (the common, working flow). When TWO sidecar tracks share a stem
-    # (e.g. `ep.ass` = eng and `stemB/ep.ass` = kor), the stem is ambiguous: a
-    # stem-keyed language would leak one track's identity onto the other (P2-1),
-    # so on a stem COLLISION the alias is NOT stored and the registry keeps only
-    # the track-id keys. `cmd_run` resolves the target identity via
-    # `subtitle_languages.get(case.track_id)`: for a collided stem that lookup
-    # returns nothing, giving the identity-unknown abstain path (never a
-    # wrong-identity lexical reject).
-    from collections import Counter
-
-    sidecar_stem_counts = Counter(
-        Path(target.removeprefix("sidecar:")).stem
-        for target in subtitles.values()
-        if target.startswith("sidecar:")
-    )
-    for track_id, target in subtitles.items():
-        if target.startswith("sidecar:") and track_id in subtitle_languages:
-            stem = Path(target.removeprefix("sidecar:")).stem
-            if sidecar_stem_counts[stem] == 1:
-                subtitle_languages.setdefault(stem, subtitle_languages[track_id])
     duration = None
     fmt = streams.get("format", {})
     if fmt.get("duration"):
@@ -1020,6 +1030,10 @@ def cmd_case_prepare(args, paths) -> int:
         out_path=out,
         gold_classification_path=Path(gold) if gold else None,
         notes=args.notes,
+        # M1: persist the REGISTERED track id, never a path-derived stem. Every
+        # registry-keyed consumer (language routing, subtitle fingerprint
+        # binding, gold classification) looks up by this exact identifier.
+        track_id=args.track_id,
     )
     try:
         rel = Path(case.generated_path).resolve().relative_to(paths["root"].resolve())
@@ -1158,6 +1172,14 @@ def cmd_run(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
+        # M1 fail-closed: a manifest whose track_id is not a registered track id
+        # (pre-fix stem-based manifest) is refused BEFORE any fingerprint, gold,
+        # audio, or candidate work — never silently reinterpreted.
+        identity = _unregistered_track_reason(case, source)
+        if identity:
+            print(f"REFUSED ({case_id}): {identity}", file=sys.stderr)
+            rc = 2
+            continue
         gold_sha = _gold_content_sha256(paths, case)
         corrupted_path = _resolve_generated(paths, case)
         corrupted = Track.load(corrupted_path, case.fmt)
@@ -1386,6 +1408,13 @@ def cmd_score(args, paths) -> int:
                 print(f"SOURCE CHECK FAILED ({case_id}): {p}", file=sys.stderr)
             return 3
         source = sources["sources"][case.source_id]
+        # M1 fail-closed: refuse a stem-based (pre-fix) manifest whose track_id
+        # is not registered BEFORE provenance checks, fingerprint recomputation,
+        # scoring, or stale-score deletion.
+        identity = _unregistered_track_reason(case, source)
+        if identity:
+            print(f"REFUSED ({case_id}): {identity}", file=sys.stderr)
+            return 2
         gold_sha = _gold_content_sha256(paths, case)
         corrupted = Track.load(_resolve_generated(paths, case), case.fmt)
         corrupted_times = corrupted.time_map()
@@ -1492,7 +1521,12 @@ def cmd_score(args, paths) -> int:
 
 
 def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
-    """True when present-day case manifest + registered source cannot be established."""
+    """True when present-day case manifest + registered source cannot be established.
+
+    M1: a manifest whose track_id is not registered for its source counts as
+    missing current evidence (fail-closed), so the report renders its rows only
+    in the labeled unverified-historical section, never comparably.
+    """
     case_path = _lookup_case_path(paths, case_id)
     if case_path is None:
         return True
@@ -1501,7 +1535,10 @@ def _case_evidence_missing(paths: dict[str, Path], case_id: str) -> bool:
     except (OSError, ValueError):
         return True
     sources = _load_sources(paths["sources"])
-    return sources["sources"].get(case.source_id) is None
+    source = sources["sources"].get(case.source_id)
+    if source is None:
+        return True
+    return bool(_unregistered_track_reason(case, source))
 
 
 def cmd_report(args, paths) -> int:
@@ -1537,8 +1574,18 @@ def cmd_report(args, paths) -> int:
             except (OSError, ValueError):
                 case = None
         source = sources["sources"].get(case.source_id) if case is not None else None
+        # M1 fail-closed: an unregistered manifest track id means the current
+        # case/source identity cannot be established; the fingerprint (which
+        # binds the subtitle spec/sha via case.track_id) is NEVER computed from
+        # a registry lookup that returns None. The case's rows fall through the
+        # F05 unverified-historical path instead.
+        identity_problem = (
+            _unregistered_track_reason(case, source)
+            if case is not None and source is not None
+            else ""
+        )
         gold_sha = _gold_content_sha256(paths, case) if case is not None else None
-        evidence_missing = case is None or source is None
+        evidence_missing = case is None or source is None or bool(identity_problem)
         for d in (
             (paths["results"] / case_id).iterdir()
             if (paths["results"] / case_id).exists()
@@ -1659,7 +1706,12 @@ def cmd_report(args, paths) -> int:
                             run.get("proposal_sha256"),
                         )
                         versions.update(run.get("tool_versions", {}))
-                        if case is not None and source is not None and cand:
+                        if (
+                            case is not None
+                            and source is not None
+                            and cand
+                            and not identity_problem
+                        ):
                             current_fingerprints[(run.get("case_id"), cand)] = (
                                 compute_input_fingerprint(
                                     case,
@@ -1837,9 +1889,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "run",
         help=(
-            "run candidate adapters (exit 0 ok, 2 unsafe id/missing case, 3 source "
-            "mutation, 4 audio-selection refusal, 6 stale base proposal for b1-va: "
-            "re-run the base candidate)"
+            "run candidate adapters (exit 0 ok, 2 unsafe id/missing case/case "
+            "manifest track_id not registered (re-prepare), 3 source mutation, "
+            "4 audio-selection refusal, 6 stale base proposal for b1-va: re-run "
+            "the base candidate)"
         ),
     )
     p.add_argument("--case", action="append", required=True)
@@ -1863,7 +1916,8 @@ def build_parser() -> argparse.ArgumentParser:
         "score",
         help=(
             "score proposals vs injected ground truth (exit 0 ok, 2 unsafe id/"
-            "missing case, 3 source mutation, 6 STALE/UNVERIFIED candidate "
+            "missing case/case manifest track_id not registered (re-prepare), "
+            "3 source mutation, 6 STALE/UNVERIFIED candidate "
             "results: run.json provenance missing, legacy, bound to a different "
             "case generation/selected audio, or proposal.json bytes tampered — "
             "the candidate must be re-run; its stale score.json is deleted)"

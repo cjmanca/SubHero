@@ -108,7 +108,9 @@ def _s00_case(tmp_path, fixture_track: str = "episode.ass", fixture_dir=None):
     if src is None:
         src = tmp_path / "episode.ass"
         src.write_text(BASE_ASS, encoding="utf-8")
-    case = prepare_case("SAF", "safe-case", "S00", 1, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "SAF", "safe-case", "S00", 1, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path), case.fmt)
     return case, corrupted
 
@@ -175,7 +177,9 @@ def test_timing_only_output_maps_normally(tmp_path):
 
 def test_proxy_arm_reordered_output_ambiguous_and_timing_ok(tmp_path, fixture_dir):
     src = fixture_dir / "episode.ass"
-    case = prepare_case("SAF", "safe-px", "S00", 1, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "SAF", "safe-px", "S00", 1, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path), case.fmt)
     stub = _write_stub(tmp_path, "reorder.py", REORDER_STUB)
     proposal, _meta = run_candidate(
@@ -389,7 +393,9 @@ def test_run_score_report_refuse_unsafe_case_ids(tmp_path, capsys):
 def test_run_candidate_rejects_unsafe_ids_before_mkdir(tmp_path):
     src = tmp_path / "episode.ass"
     src.write_text(BASE_ASS, encoding="utf-8")
-    case = prepare_case("SAF", "safe-id", "S00", 1, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "SAF", "safe-id", "S00", 1, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path))
     scratch = tmp_path / "must-not-exist"
     with pytest.raises(ValueError, match="candidate id"):
@@ -592,7 +598,9 @@ MULTI_REWRITE_STUB = (
 def _build_case(tmp_path, ass_text, scenario="S01", seed=8):
     src = tmp_path / "dup.ass"
     src.write_text(ass_text, encoding="utf-8")
-    case = prepare_case("DUP", "dup-case", scenario, seed, src, tmp_path / "out.ass")
+    case = prepare_case(
+        "DUP", "dup-case", scenario, seed, src, tmp_path / "out.ass", track_id="episode"
+    )
     corrupted = Track.load(Path(case.generated_path), case.fmt)
     return case, corrupted
 
