@@ -23,3 +23,4 @@
 - 2026-10-15 M1 accepted: plan freeze + ledger `5f83e97`, M1 `c015616`; suite 321; red phase reproduced.
 - 2026-10-15 M2 accepted: `345a6d4`; suite 329; design corrected to claim-kept after the preserved sparse-gap test rejected claim suppression (documented in goal plan revision 2).
 - 2026-10-15 Final verification accepted: adversarial round 1 (M1 PASS 40 attacks; F1 P2 closed `aad48cf`); canonical matrix re-executed (5 S01 rows as designed, 42 byte-identical, drop-counts 0); committed plumbing report re-versioned; findings.md fifth-review section from observed measurements; suite 331, lint clean. **Plan gate PASSED. Next milestone (operator): G0/G1 real-episode synchronization benchmarking with user-provided known-good Japanese + Mandarin episodes.**
+- 2026-10-15 `9979801..0ab0354` (5 commits) pushed to `origin/main` on explicit user authorization; branch in sync, working tree clean.
