@@ -130,18 +130,34 @@ class HTTPLocalTranscriber:
 
         started = time.monotonic()
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        form = {
+            "model": self.model,
+            "language": language,
+            "response_format": "verbose_json",
+        }
         with open(wav_path, "rb") as fh:
             resp = requests.post(
                 f"{self.base_url}/audio/transcriptions",
                 headers=headers,
                 files={"file": (wav_path.name, fh, "audio/wav")},
-                data={
-                    "model": self.model,
-                    "language": language,
-                    "response_format": "verbose_json",
-                },
+                data=form,
                 timeout=300,
             )
+        # Local servers that reject verbose_json often return the same
+        # "segments" structure in their plain "json" format (faster-whisper
+        # FastAPI ports). Retry exactly once on the same endpoint when the
+        # 400 names response_format; every other failure keeps the
+        # raise_for_status() abstention path.
+        if resp.status_code == 400 and "response_format" in resp.text:
+            form["response_format"] = "json"
+            with open(wav_path, "rb") as fh:
+                resp = requests.post(
+                    f"{self.base_url}/audio/transcriptions",
+                    headers=headers,
+                    files={"file": (wav_path.name, fh, "audio/wav")},
+                    data=form,
+                    timeout=300,
+                )
         secs = time.monotonic() - started
         resp.raise_for_status()
         payload = resp.json()

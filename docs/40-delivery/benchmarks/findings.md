@@ -1,13 +1,13 @@
 # Benchmark findings and algorithm decision records
 
-**Status: harness executed on synthetic plumbing fixtures; no real-media experiments yet.** This page is an index of actual evidence and decisions, not a prediction of winners. Source requirements remain in their owning feature documents; unresolved items remain in [the experiments register](../open-questions-and-experiments.md).
+**Status: harness executed on synthetic plumbing fixtures and first real-media matrix (E01/E02, live local endpoints) 2026-10-15; no algorithm selection.** This page is an index of actual evidence and decisions, not a prediction of winners. Source requirements remain in their owning feature documents; unresolved items remain in [the experiments register](../open-questions-and-experiments.md).
 
 ## Experiment status
 
 | ID | Purpose | Current state | Evidence/decision |
 | --- | --- | --- | --- |
-| B0 | Corpus, labels, minimal runner | **in_progress** — runner + synthetic fixture complete; scoring/measurement validity corrected through the sixth-review remediation 2026-10-15 (341 focused tests; see sixth-review section) | `benchmarks/` CLI implemented; offline runs on `Fx00` fixture produced machine-readable proposals/scores; real-media clean controls (G0) **pending** user episodes E01/E02 |
-| B1 | ffsubsync / ALASS / targeted ASR validation | **in_progress** — arms executable, canonical Fx00 matrix re-scored under schema-4 whole-cue scoring (sixth review; proposals/run records unchanged, 15 of 47 rows changed as designed, all report drop-counts 0) | ffsubsync 0.5.1 global + `--split-penalty` executed; ALASS 2.0.0 installed and executed 2026-10-15 (arm live on all 7 canonical cases — see ALASS section); `b1-va` → `not_run` (no local ASR/semantic-verifier endpoints configured). No algorithm selection; G1 **blocked** pending real media |
+| B0 | Corpus, labels, minimal runner | **in_progress** — runner + synthetic fixture complete; scoring/measurement validity corrected through the sixth-review remediation 2026-10-15 (341 focused tests; see sixth-review section) | `benchmarks/` CLI implemented; offline runs on `Fx00` fixture produced machine-readable proposals/scores; G0 satisfied 2026-10-15: E01/E02 registered `private-local`, S00 clean controls scored with no-op zero-regression (0 µs onset median) |
+| B1 | ffsubsync / ALASS / targeted ASR validation | **in_progress** — arms executable; first real-media matrix executed 2026-10-15 with live local endpoints (see R1 record) | ffsubsync 0.5.1 global + `--split-penalty` executed; ALASS 2.0.0 installed and executed 2026-10-15; `b1-va` live on E01/E02 (0 automatic acceptances — reliability gate uncalibrated, see R1); No algorithm selection; G1 evidence collected, selection blocked pending confidence-threshold calibration |
 | B2 | Full source-language ASR + forced alignment | **Not started** | None |
 | B3 | Cross-language utterance/cue matching | **Not started** | None |
 | B4 | Translation correction | **Not started** | None |
@@ -185,3 +185,28 @@ A conditional decision should state **where** it applies (e.g. global offsets on
 - Separate measured facts from inference; attach input and command hashes, software/model versions, human-label uncertainty and usable reproduction steps.
 - Calibrate automated thresholds only after independent holdouts; record version- and language-specific limitations, and reevaluate decisions after upstream model/tool changes.
 - Update the [open-experiments register](../open-questions-and-experiments.md) and one owning requirements document when necessary. Do not silently promote a provisional result into a product requirement.
+
+## R1 — First real-media matrix (E01/E02) with live local endpoints (2026-10-15)
+
+### Setup and artifacts
+- Sources: `E01` (ja audio, embedded eng ASS), `E02` (zh audio, embedded eng SRT), registered `private-local`, read-only. 12 cases prepared (S00–S04, S06, seed 12); manifests under `benchmarks/private/cases/` (not committed). 7 canonical `Fx00` cases re-run under the same harness generation. Reports: `benchmarks/results/report-*.md` (local, all drop-counts 0).
+- Endpoints (local/LAN only, per benchmark policy): ASR = faster-whisper **1.2.1** + PyAV **18.1.0** FastAPI server, `whisper-large-v3-turbo` (127.0.0.1); semantic verifier = llama.cpp server, **swift-1.5-iq3_xxs** (LAN). Harness support added this run: `verbose_json`→`json` segments fallback (`bench/bench/asr.py`); UTF-8 decoding for `ffprobe`/`ffmpeg` subprocess output (`bench/media.py`, `adapters.py`, `cli.py` — required by E02's non-ASCII stream titles). 341/341 offline tests, ruff clean.
+- Tool versions: ffsubsync 0.5.1; ALASS 2.0.0 (version probe records clap's `-v` error line — cosmetic, known).
+
+### Observations (denominators: 6 cases per episode; median whole-file onset error vs injected ground truth)
+- **E01 (ja anime, ASS):** `b1-fg`, `b1-fp`, `b1-px-fp` → `mapping_failure_ambiguous_text` on **all 6** cases (no scored proposals; includes the S00 untouched control). `b1-px-fg` scored on all 6: 40–60 ms median (S03: 40 ms vs no-op 18 640 ms). `b1-al` scored on all 6: 12 850–21 130 ms, **worse than no-op** on S02 (21 130 vs 630 ms) and S03 (30 530 vs 18 640 ms). No-op: 0 on S00/S04/S06 controls.
+- **E02 (zh drama, SRT):** `b1-fg` 18–20 ms and `b1-px-fg` 18–30 ms on all 6; `b1-al` 60–80 ms on all 6; `b1-fp`/`b1-px-fp` → mapping failure on all 6.
+- **`b1-va` (targeted-ASR validation, base `b1-px-fg`):** ran to `success` on all 12 real cases (13 ASR windows + 13 verifier judgments per case; 36–263 s total inference per case). **Automatic acceptances: 0** (report `Acc validated` column zero on every row; zero false accepts against injected truth). Recorded abstention reasons: (a) verifier returned **match** but acceptance blocked by ASR reliability gate (`avg_logprob` missing/sentinel −1.0 or below `MIN_CONFIDENCE = -0.5`); (b) broad ASR segments crossing proposed interval boundaries → timing correspondence unverified. Counterfactual `if_blindly_applied`: the underlying `b1-px-fg` proposals would have recovered offsets (18–60 ms) — i.e. validation currently converts good proposals into **no repair**, safely.
+- Fx00 re-run under live endpoints: `b1-va` → `abstain` on all 7 (synthetic tones produce no usable reliability signal; expected, plumbing-only fixture).
+
+### Failure analysis and scope
+- Single seed per scenario, single episode per language, synthetic timestamp corruptions only (no true release edits), no gold cue-classification on real episodes. Cross-language verdicts rely on the semantic verifier; lexical scores never decide ja/zh↔en pairs (by design).
+- `b1-al` on E01: ALASS acoustic alignment is unsuitable for Japanese audio at these magnitudes (regresses beyond baseline on discontinuities) — measured, single episode.
+- E01 `mapping_failure_ambiguous_text` on the clean control shows ffsubsync event rewriting frequently breaks verified cue correspondence on real ASS; correspondence handling is the E01 blocker, not offset estimation.
+- 0-acceptance outcome is a threshold property, not evidence the proposals are wrong: calibration of the reliability gate (and verifier sampling budget) is the gating experiment.
+
+### Decision
+**No selection.** Candidates remain unranked. Smallest next experiment: harvest per-region `avg_logprob`/verdict distributions from this run's `score.json`/`run.json` artifacts; calibrate `MIN_CONFIDENCE` (and cross-language acceptance policy) on a training split with an independent episode held out (E03-style); re-run the 12-case matrix and record acceptance/abstention/false-accept counts per arm.
+
+### Safe fallback and reevaluation triggers
+All 0-acceptance paths retain original timing (fail-closed, verified). Reevaluate on: faster-whisper/whisper model swap, verifier model swap (`.env` label must equal served model), ASR endpoint changes, new episodes, seed diversification.

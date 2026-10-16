@@ -138,6 +138,8 @@ def _refuse_unsafe_root(root: Path, repo_root: Path, default_root: Path) -> int 
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode == 0:
         return None

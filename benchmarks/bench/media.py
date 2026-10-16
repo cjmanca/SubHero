@@ -49,6 +49,8 @@ def ffprobe_streams(media_path: Path) -> dict[str, Any]:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )
@@ -90,6 +92,8 @@ def extract_audio(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=900,
         check=False,
     )
@@ -137,6 +141,8 @@ def extract_audio_window(
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=120,
         check=False,
     )
@@ -172,6 +178,8 @@ def extract_subtitle_stream(media_path: Path, sidx: int, out_ass: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
         check=False,
     )

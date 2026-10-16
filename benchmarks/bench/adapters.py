@@ -94,7 +94,13 @@ class ToolConfig:
 def probe_version(cmd: list[str]) -> str:
     try:
         proc = subprocess.run(
-            [*cmd, "-v"], capture_output=True, text=True, timeout=60, check=False
+            [*cmd, "-v"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
         )
         out = (proc.stdout + proc.stderr).strip()
         return out.splitlines()[0] if out else "unknown"
@@ -105,7 +111,13 @@ def probe_version(cmd: list[str]) -> str:
 def probe_split_penalty(cmd: list[str]) -> bool:
     try:
         proc = subprocess.run(
-            [*cmd, "--help"], capture_output=True, text=True, timeout=60, check=False
+            [*cmd, "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
         )
         return "--split-penalty" in proc.stdout
     except (OSError, subprocess.TimeoutExpired):
@@ -118,7 +130,13 @@ def _run(
     started = time.monotonic()
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         return -1, "", f"timeout after {timeout}s: {exc}", time.monotonic() - started
